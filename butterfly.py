@@ -1107,7 +1107,7 @@ def train(total_updates=1000, output_model=None):
 
             print()  # move past the in-place backprop progress bar
 
-            if update % 10 == 0:
+            if update % 5 == 0:
                 average_reward = rewards.mean().item()
                 average_value = values.mean().item()
                 average_advantage = advantages.mean().item()
@@ -1118,7 +1118,6 @@ def train(total_updates=1000, output_model=None):
                     f"value={average_value: .4f} | "
                     f"advantage={average_advantage: .4f} | "
                     f"loss={loss.item(): .4f}",
-                    end="\n\n",
                 )
 
             if update % 100 == 0:
