@@ -435,8 +435,8 @@ class ButterflyEnv:
             self.clock = pygame.time.Clock()
 
         if self.font is None:
-            self.font = pygame.font.SysFont("consola", 16)
-            self.font_small = pygame.font.SysFont("consola", 13)
+            self.font = pygame.font.SysFont("consolas", 16)
+            self.font_small = pygame.font.SysFont("consolas", 13)
 
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
