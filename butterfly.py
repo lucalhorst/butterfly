@@ -67,10 +67,18 @@ _DEFAULTS = {
         "night_duration": 50,
         "plant_cooldown": 25,
         "interval_phases_max": 3,
+        "day_night_cycle_enabled": True,
         "plant_types": ["day", "night", "interval", "random"],
         "plant_type_probs": [0.35, 0.35, 0.2, 0.1],
+        "plant_types_enabled": {
+            "day": True,
+            "night": True,
+            "interval": True,
+            "random": True,
+        },
     },
     "predator": {
+        "enabled": True,
         "speed": 0.025,
         "detection_range": 0.3,
         "chase_speed": 0.035,
@@ -408,14 +416,27 @@ class Chunk:
         chunk_seed = hash((self.chunk_x, self.chunk_y)) % (2**31)
         chunk_rng = np.random.default_rng(chunk_seed)
 
+        enabled = cfg.world.plant_types_enabled
+        enabled_dict = enabled.to_dict() if isinstance(enabled, Config) else enabled
+        enabled_types = [t for t in cfg.world.plant_types if enabled_dict.get(t, True)]
+        enabled_probs = [
+            p for t, p in zip(cfg.world.plant_types, cfg.world.plant_type_probs)
+            if enabled_dict.get(t, True)
+        ]
+
+        if not enabled_types:
+            enabled_types = ["day"]
+            enabled_probs = [1.0]
+
+        total = sum(enabled_probs)
+        enabled_probs = [p / total for p in enabled_probs]
+
         for _ in range(cfg.world.plants_per_chunk):
             local_pos = chunk_rng.uniform(0, cfg.world.chunk_size, size=2).astype(
                 np.float32
             )
 
-            plant_type = chunk_rng.choice(
-                cfg.world.plant_types, p=cfg.world.plant_type_probs
-            )
+            plant_type = chunk_rng.choice(enabled_types, p=enabled_probs)
 
             plant = {
                 "type": plant_type,
@@ -529,14 +550,20 @@ class WorldManager:
         if current_step < plant["cooldown_until"]:
             return False
 
-        step_in_cycle = current_step % cfg.world.day_cycle_length
-        is_daytime = step_in_cycle < cfg.world.day_duration
+        if cfg.world.day_night_cycle_enabled:
+            step_in_cycle = current_step % cfg.world.day_cycle_length
+            is_daytime = step_in_cycle < cfg.world.day_duration
+        else:
+            is_daytime = True
 
         if plant["type"] == "day":
             return is_daytime
         elif plant["type"] == "night":
             return not is_daytime
         elif plant["type"] == "interval":
+            if not cfg.world.day_night_cycle_enabled:
+                return True
+            step_in_cycle = current_step % cfg.world.day_cycle_length
             return self._check_interval_active(plant, step_in_cycle)
         elif plant["type"] == "random":
             return self._check_random_active(plant, current_step)
@@ -614,10 +641,13 @@ class ButterflyEnv:
 
         self.world.update(self.butterfly_world_pos)
 
-        bird_spawn = self.rng.uniform(
-            -cfg.world.chunk_size, cfg.world.chunk_size, size=2
-        ).astype(np.float32)
-        self.bird = Bird(bird_spawn, self.rng)
+        if cfg.predator.enabled:
+            bird_spawn = self.rng.uniform(
+                -cfg.world.chunk_size, cfg.world.chunk_size, size=2
+            ).astype(np.float32)
+            self.bird = Bird(bird_spawn, self.rng)
+        else:
+            self.bird = None
 
         observation = self.render_observation()
         scalar_inputs = self.get_scalar_inputs()
@@ -627,7 +657,11 @@ class ButterflyEnv:
     def step(self, action):
         self.steps += 1
         self.time_step += 1
-        self.is_daytime = (self.time_step % cfg.world.day_cycle_length) < cfg.world.day_duration
+
+        if cfg.world.day_night_cycle_enabled:
+            self.is_daytime = (self.time_step % cfg.world.day_cycle_length) < cfg.world.day_duration
+        else:
+            self.is_daytime = True
 
         action = np.asarray(action, dtype=np.float32)
         action = np.clip(action, -1.0, 1.0)
@@ -664,8 +698,10 @@ class ButterflyEnv:
                 plant_ref["active"] = False
                 plant_ref["cooldown_until"] = self.time_step + cfg.world.plant_cooldown
 
-        bird_result = self.bird.update(self.butterfly_world_pos)
-        bird_killed = bird_result == "kill"
+        bird_killed = False
+        if cfg.predator.enabled and self.bird is not None:
+            bird_result = self.bird.update(self.butterfly_world_pos)
+            bird_killed = bird_result == "kill"
 
         hunger_dead = self.hunger <= 0.0
         terminated = hunger_dead or bird_killed
@@ -694,7 +730,7 @@ class ButterflyEnv:
                 "hunger": self.hunger,
                 "time_step": self.time_step,
                 "is_daytime": self.is_daytime,
-                "bird_state": self.bird.state,
+                "bird_state": self.bird.state if self.bird is not None else None,
                 "bird_killed": bird_killed,
             },
         )
@@ -1745,6 +1781,140 @@ def play(weights=None):
 # ============================================================
 
 
+def _str_to_bool(v):
+    if isinstance(v, bool):
+        return v
+    if v.lower() in ("true", "1", "yes"):
+        return True
+    if v.lower() in ("false", "0", "no"):
+        return False
+    raise argparse.ArgumentTypeError(f"Boolean value expected, got {v!r}")
+
+
+# Mapping of argparse dest -> dot-path into the config. Kept as a
+# module-level so both build_parser (to create the args) and main
+# (to apply overrides) can share it. argparse mangles dots/hyphens
+# into underscores in the dest, so we use explicit dest names.
+_CONFIG_ARG_DESTS = {
+    "training": {
+        "training_rollout_length": "training.rollout_length",
+        "training_ppo_epochs": "training.ppo_epochs",
+        "training_minibatch_size": "training.minibatch_size",
+        "training_gamma": "training.gamma",
+        "training_gae_lambda": "training.gae_lambda",
+        "training_clip_epsilon": "training.clip_epsilon",
+        "training_learning_rate": "training.learning_rate",
+        "training_entropy_coef": "training.entropy_coef",
+        "training_value_coef": "training.value_coef",
+        "training_num_envs": "training.num_envs",
+        "training_gradient_max_norm": "training.gradient_max_norm",
+        "training_checkpoint_interval": "training.checkpoint_interval",
+        "training_log_interval": "training.log_interval",
+    },
+    "environment": {
+        "environment_image_size": "environment.image_size",
+        "environment_max_steps": "environment.max_steps",
+        "environment_history_length": "environment.history_length",
+        "environment_food_track_limit": "environment.food_track_limit",
+        "environment_food_detection_radius": "environment.food_detection_radius",
+        "environment_initial_hunger": "environment.initial_hunger",
+        "environment_hunger_depletion_per_step": "environment.hunger_depletion_per_step",
+        "environment_food_hunger_restore": "environment.food_hunger_restore",
+        "environment_butterfly_speed": "environment.butterfly_speed",
+    },
+    "environment.rewards": {
+        "environment_rewards_base_step": "environment.rewards.base_step",
+        "environment_rewards_movement_scale": "environment.rewards.movement_scale",
+        "environment_rewards_eating_distance": "environment.rewards.eating_distance",
+        "environment_rewards_eating_reward": "environment.rewards.eating_reward",
+        "environment_rewards_hunger_death_penalty": "environment.rewards.hunger_death_penalty",
+        "environment_rewards_bird_kill_penalty": "environment.rewards.bird_kill_penalty",
+    },
+    "world": {
+        "world_chunk_size": "world.chunk_size",
+        "world_chunks_loaded": "world.chunks_loaded",
+        "world_plants_per_chunk": "world.plants_per_chunk",
+        "world_day_cycle_length": "world.day_cycle_length",
+        "world_day_duration": "world.day_duration",
+        "world_night_duration": "world.night_duration",
+        "world_plant_cooldown": "world.plant_cooldown",
+        "world_interval_phases_max": "world.interval_phases_max",
+        "world_day_night_cycle_enabled": "world.day_night_cycle_enabled",
+    },
+    "predator": {
+        "predator_enabled": "predator.enabled",
+        "predator_speed": "predator.speed",
+        "predator_detection_range": "predator.detection_range",
+        "predator_chase_speed": "predator.chase_speed",
+        "predator_patrol_range": "predator.patrol_range",
+    },
+    "network": {
+        "network_feature_size": "network.feature_size",
+        "network_transformer_heads": "network.transformer_heads",
+        "network_transformer_feedforward": "network.transformer_feedforward",
+        "network_transformer_dropout": "network.transformer_dropout",
+        "network_transformer_layers": "network.transformer_layers",
+    },
+    "rendering": {
+        "rendering_window_size": "rendering.window_size",
+        "rendering_play_seed": "rendering.play_seed",
+    },
+}
+
+# Dest -> (type, name) for the CLI args, in case we want richer types.
+_CONFIG_ARG_TYPES = {
+    "training_rollout_length": int,
+    "training_ppo_epochs": int,
+    "training_minibatch_size": int,
+    "training_gamma": float,
+    "training_gae_lambda": float,
+    "training_clip_epsilon": float,
+    "training_learning_rate": float,
+    "training_entropy_coef": float,
+    "training_value_coef": float,
+    "training_num_envs": int,
+    "training_gradient_max_norm": float,
+    "training_checkpoint_interval": int,
+    "training_log_interval": int,
+    "environment_image_size": int,
+    "environment_max_steps": int,
+    "environment_history_length": int,
+    "environment_food_track_limit": int,
+    "environment_food_detection_radius": float,
+    "environment_initial_hunger": float,
+    "environment_hunger_depletion_per_step": float,
+    "environment_food_hunger_restore": float,
+    "environment_butterfly_speed": float,
+    "environment_rewards_base_step": float,
+    "environment_rewards_movement_scale": float,
+    "environment_rewards_eating_distance": float,
+    "environment_rewards_eating_reward": float,
+    "environment_rewards_hunger_death_penalty": float,
+    "environment_rewards_bird_kill_penalty": float,
+    "world_chunk_size": int,
+    "world_chunks_loaded": int,
+    "world_plants_per_chunk": int,
+    "world_day_cycle_length": int,
+    "world_day_duration": int,
+    "world_night_duration": int,
+    "world_plant_cooldown": int,
+    "world_interval_phases_max": int,
+    "world_day_night_cycle_enabled": _str_to_bool,
+    "predator_enabled": _str_to_bool,
+    "predator_speed": float,
+    "predator_detection_range": float,
+    "predator_chase_speed": float,
+    "predator_patrol_range": float,
+    "network_feature_size": int,
+    "network_transformer_heads": int,
+    "network_transformer_feedforward": int,
+    "network_transformer_dropout": float,
+    "network_transformer_layers": int,
+    "rendering_window_size": int,
+    "rendering_play_seed": int,
+}
+
+
 def build_parser():
     parser = argparse.ArgumentParser(
         description="Virtual Butterfly RL agent",
@@ -1780,66 +1950,30 @@ def build_parser():
         ),
     )
 
-    training = parser.add_argument_group("training")
-    training.add_argument("--training.rollout-length", type=int, default=None)
-    training.add_argument("--training.ppo-epochs", type=int, default=None)
-    training.add_argument("--training.minibatch-size", type=int, default=None)
-    training.add_argument("--training.gamma", type=float, default=None)
-    training.add_argument("--training.gae-lambda", type=float, default=None)
-    training.add_argument("--training.clip-epsilon", type=float, default=None)
-    training.add_argument("--training.learning-rate", type=float, default=None)
-    training.add_argument("--training.entropy-coef", type=float, default=None)
-    training.add_argument("--training.value-coef", type=float, default=None)
-    training.add_argument("--training.num-envs", type=int, default=None)
-    training.add_argument("--training.gradient-max-norm", type=float, default=None)
-    training.add_argument("--training.checkpoint-interval", type=int, default=None)
-    training.add_argument("--training.log-interval", type=int, default=None)
+    group_names = {
+        "training": "training",
+        "environment": "environment",
+        "environment.rewards": "environment.rewards",
+        "world": "world",
+        "predator": "predator",
+        "network": "network",
+        "rendering": "rendering",
+    }
 
-    environment = parser.add_argument_group("environment")
-    environment.add_argument("--environment.image-size", type=int, default=None)
-    environment.add_argument("--environment.max-steps", type=int, default=None)
-    environment.add_argument("--environment.history-length", type=int, default=None)
-    environment.add_argument("--environment.food-track-limit", type=int, default=None)
-    environment.add_argument("--environment.food-detection-radius", type=float, default=None)
-    environment.add_argument("--environment.initial-hunger", type=float, default=None)
-    environment.add_argument("--environment.hunger-depletion-per-step", type=float, default=None)
-    environment.add_argument("--environment.food-hunger-restore", type=float, default=None)
-    environment.add_argument("--environment.butterfly-speed", type=float, default=None)
-
-    rewards = parser.add_argument_group("environment.rewards")
-    rewards.add_argument("--environment.rewards.base-step", type=float, default=None)
-    rewards.add_argument("--environment.rewards.movement-scale", type=float, default=None)
-    rewards.add_argument("--environment.rewards.eating-distance", type=float, default=None)
-    rewards.add_argument("--environment.rewards.eating-reward", type=float, default=None)
-    rewards.add_argument("--environment.rewards.hunger-death-penalty", type=float, default=None)
-    rewards.add_argument("--environment.rewards.bird-kill-penalty", type=float, default=None)
+    for group_name in group_names:
+        group = parser.add_argument_group(group_name)
+        for dest in _CONFIG_ARG_DESTS[group_name]:
+            arg_type = _CONFIG_ARG_TYPES[dest]
+            group.add_argument(f"--{dest.replace('_', '-')}", type=arg_type, default=None)
 
     world = parser.add_argument_group("world")
-    world.add_argument("--world.chunk-size", type=int, default=None)
-    world.add_argument("--world.chunks-loaded", type=int, default=None)
-    world.add_argument("--world.plants-per-chunk", type=int, default=None)
-    world.add_argument("--world.day-cycle-length", type=int, default=None)
-    world.add_argument("--world.day-duration", type=int, default=None)
-    world.add_argument("--world.night-duration", type=int, default=None)
-    world.add_argument("--world.plant-cooldown", type=int, default=None)
-    world.add_argument("--world.interval-phases-max", type=int, default=None)
-
-    predator = parser.add_argument_group("predator")
-    predator.add_argument("--predator.speed", type=float, default=None)
-    predator.add_argument("--predator.detection-range", type=float, default=None)
-    predator.add_argument("--predator.chase-speed", type=float, default=None)
-    predator.add_argument("--predator.patrol-range", type=float, default=None)
-
-    network = parser.add_argument_group("network")
-    network.add_argument("--network.feature-size", type=int, default=None)
-    network.add_argument("--network.transformer-heads", type=int, default=None)
-    network.add_argument("--network.transformer-feedforward", type=int, default=None)
-    network.add_argument("--network.transformer-dropout", type=float, default=None)
-    network.add_argument("--network.transformer-layers", type=int, default=None)
-
-    rendering = parser.add_argument_group("rendering")
-    rendering.add_argument("--rendering.window-size", type=int, default=None)
-    rendering.add_argument("--rendering.play-seed", type=int, default=None)
+    world.add_argument(
+        "--world.enabled-plant-types",
+        dest="world_enabled_plant_types",
+        type=str,
+        default=None,
+        help="Comma-separated list of enabled plant types (e.g. 'day,night,interval'). Overrides plant_types_enabled.",
+    )
 
     return parser
 
@@ -1854,16 +1988,23 @@ if __name__ == "__main__":
 
     cfg = load_config(args.config)
 
-    # Convert argparse namespace to dict, filtering out non-config keys
-    config_keys = {
-        "training", "environment", "world", "predator", "network", "rendering"
-    }
+    # Build the dest -> config-path reverse lookup
+    dest_to_config = {}
+    for mapping in _CONFIG_ARG_DESTS.values():
+        dest_to_config.update(mapping)
+
     cli_overrides = {}
-    for key, value in vars(args).items():
-        if key in ("config", "mode", "updates", "weights", "seed", "threads"):
+    for dest, value in vars(args).items():
+        if value is None or dest not in dest_to_config:
             continue
-        if "." in key and value is not None:
-            cli_overrides[key] = value
+        cli_overrides[dest_to_config[dest]] = value
+
+    # Handle --world.enabled-plant-types: convert comma-separated list to dict
+    enabled_plant_types_str = getattr(args, "world_enabled_plant_types", None)
+    if enabled_plant_types_str is not None:
+        enabled = [t.strip() for t in enabled_plant_types_str.split(",")]
+        all_types = cfg.world.plant_types
+        cfg.world.plant_types_enabled = {t: (t in enabled) for t in all_types}
 
     cfg.set_from_args(cli_overrides)
 
