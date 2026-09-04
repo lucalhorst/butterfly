@@ -240,6 +240,9 @@ class ButterflyEnv:
 
         self.window = None
         self.clock = None
+        self.font = None
+        self.show_full_stats = False
+        self.display_stats = {}
 
     def reset(self):
         self.butterfly = self.rng.uniform(low=0.15, high=0.85, size=2).astype(
@@ -431,9 +434,16 @@ class ButterflyEnv:
         if self.clock is None:
             self.clock = pygame.time.Clock()
 
+        if self.font is None:
+            self.font = pygame.font.SysFont("consola", 16)
+            self.font_small = pygame.font.SysFont("consola", 13)
+
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 self.render_enabled = False
+            elif event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_TAB:
+                    self.show_full_stats = not self.show_full_stats
 
         self.window.fill((20, 60, 25))
 
@@ -450,6 +460,43 @@ class ButterflyEnv:
         pygame.draw.circle(self.window, (240, 70, 220), (bx - 10, by), 10)
         pygame.draw.circle(self.window, (240, 70, 220), (bx + 10, by), 10)
         pygame.draw.circle(self.window, (30, 20, 30), (bx, by), 5)
+
+        # --- Stats overlay ---
+        y_off = 10
+
+        hunger_color = (
+            int(50 + 205 * self.hunger),
+            int(180 * self.hunger),
+            50,
+        )
+
+        lines = [
+            (f"Hunger: {self.hunger:.2f}", hunger_color),
+            (f"Food: {self.collected} collected, {len(self.food)} left", (220, 220, 220)),
+        ]
+
+        if self.show_full_stats:
+            lines.append((f"Step: {self.steps}/{MAX_STEPS}", (180, 180, 180)))
+            lines.append((f"Reward: {self.display_stats.get('cumulative_reward', 0.0):.2f}", (180, 180, 180)))
+            lines.append((f"Value: {self.display_stats.get('value', 0.0):.3f}", (180, 180, 180)))
+            action = self.display_stats.get("action", None)
+            if action is not None:
+                lines.append((f"Action: [{action[0]:+.3f}, {action[1]:+.3f}]", (180, 180, 180)))
+            lines.append(("TAB: hide full stats", (100, 100, 100)))
+        else:
+            lines.append(("TAB: full stats", (100, 100, 100)))
+
+        # Hunger bar background.
+        bar_x, bar_y, bar_w, bar_h = 10, y_off + len(lines) * 20 + 4, 120, 8
+        pygame.draw.rect(self.window, (40, 40, 40), (bar_x, bar_y, bar_w, bar_h))
+        # Hunger bar fill.
+        fill_w = int(bar_w * clamp(self.hunger, 0.0, 1.0))
+        pygame.draw.rect(self.window, hunger_color, (bar_x, bar_y, fill_w, bar_h))
+
+        for text, color in lines:
+            surf = self.font.render(text, True, color)
+            self.window.blit(surf, (10, y_off))
+            y_off += 20
 
         pygame.display.flip()
         self.clock.tick(60)
@@ -1170,6 +1217,7 @@ def play(weights=None):
         history.reset(observation, scalar_input)
 
         done = False
+        cumulative_reward = 0.0
 
         while not done and env.render_enabled:
             with torch.no_grad():
@@ -1178,13 +1226,21 @@ def play(weights=None):
                 image_sequence = image_sequence.unsqueeze(0).to(DEVICE)
                 scalar_sequence = scalar_sequence.unsqueeze(0).to(DEVICE)
 
-                action, _, _ = policy.sample_action(image_sequence, scalar_sequence)
+                action, _, value = policy.sample_action(image_sequence, scalar_sequence)
 
             action = action[0].cpu().numpy()
+
+            env.display_stats = {
+                "action": action.tolist(),
+                "value": value[0].item(),
+                "cumulative_reward": cumulative_reward,
+            }
 
             next_observation, next_scalars, reward, terminated, truncated, info = (
                 env.step(action)
             )
+
+            cumulative_reward += reward
 
             history.append(next_observation, next_scalars)
             done = terminated or truncated
@@ -1193,7 +1249,8 @@ def play(weights=None):
                 print(
                     "Episode finished | "
                     f"food collected={info['food_collected']} | "
-                    f"food remaining={info['food_remaining']}"
+                    f"food remaining={info['food_remaining']} | "
+                    f"total reward={cumulative_reward:.2f}"
                 )
 
 
