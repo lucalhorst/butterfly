@@ -420,7 +420,8 @@ class Chunk:
         enabled_dict = enabled.to_dict() if isinstance(enabled, Config) else enabled
         enabled_types = [t for t in cfg.world.plant_types if enabled_dict.get(t, True)]
         enabled_probs = [
-            p for t, p in zip(cfg.world.plant_types, cfg.world.plant_type_probs)
+            p
+            for t, p in zip(cfg.world.plant_types, cfg.world.plant_type_probs)
             if enabled_dict.get(t, True)
         ]
 
@@ -659,7 +660,9 @@ class ButterflyEnv:
         self.time_step += 1
 
         if cfg.world.day_night_cycle_enabled:
-            self.is_daytime = (self.time_step % cfg.world.day_cycle_length) < cfg.world.day_duration
+            self.is_daytime = (
+                self.time_step % cfg.world.day_cycle_length
+            ) < cfg.world.day_duration
         else:
             self.is_daytime = True
 
@@ -738,7 +741,9 @@ class ButterflyEnv:
     def get_scalar_inputs(self):
         hunger = np.array([self.hunger], dtype=np.float32)
 
-        time_normalized = (self.time_step % cfg.world.day_cycle_length) / cfg.world.day_cycle_length
+        time_normalized = (
+            self.time_step % cfg.world.day_cycle_length
+        ) / cfg.world.day_cycle_length
         time_input = np.array([time_normalized], dtype=np.float32)
         is_day_input = np.array([1.0 if self.is_daytime else 0.0], dtype=np.float32)
 
@@ -946,11 +951,16 @@ class ButterflyEnv:
         lines = [
             (f"Hunger: {self.hunger:.2f}", hunger_color),
             (f"Food: {self.collected} collected", (220, 220, 220)),
-            (f"Time: {time_str} ({cycle_pos}/{cfg.world.day_cycle_length})", (200, 200, 150)),
+            (
+                f"Time: {time_str} ({cycle_pos}/{cfg.world.day_cycle_length})",
+                (200, 200, 150),
+            ),
         ]
 
         if self.show_full_stats:
-            lines.append((f"Step: {self.steps}/{cfg.environment.max_steps}", (180, 180, 180)))
+            lines.append(
+                (f"Step: {self.steps}/{cfg.environment.max_steps}", (180, 180, 180))
+            )
             lines.append(
                 (
                     f"Reward: {self.display_stats.get('cumulative_reward', 0.0):.2f}",
@@ -1200,9 +1210,7 @@ class ButterflyPolicy(nn.Module):
 
         self.visual_encoder = SmallResNet(feature_size)
 
-        scalar_input_size = (
-            1 + cfg.environment.food_track_limit * 3 + 1 + 1 + 5 + 1
-        )
+        scalar_input_size = 1 + cfg.environment.food_track_limit * 3 + 1 + 1 + 5 + 1
 
         self.scalar_encoder = nn.Sequential(
             nn.Linear(scalar_input_size, 128),
@@ -1421,9 +1429,17 @@ def compute_gae(rewards, values, dones):
             next_value = values[t + 1]
             next_nonterminal = 1.0 - dones[t]
 
-        delta = rewards[t] + cfg.training.gamma * next_value * next_nonterminal - values[t]
+        delta = (
+            rewards[t] + cfg.training.gamma * next_value * next_nonterminal - values[t]
+        )
 
-        last_advantage = delta + cfg.training.gamma * cfg.training.gae_lambda * next_nonterminal * last_advantage
+        last_advantage = (
+            delta
+            + cfg.training.gamma
+            * cfg.training.gae_lambda
+            * next_nonterminal
+            * last_advantage
+        )
 
         advantages[t] = last_advantage
 
@@ -1456,9 +1472,7 @@ def train(total_updates=1000, output_model=None):
     policy = ButterflyPolicy().to(DEVICE)
     optimizer = optim.Adam(policy.parameters(), lr=cfg.training.learning_rate)
 
-    scalar_input_size = (
-        1 + cfg.environment.food_track_limit * 3 + 1 + 1 + 5 + 1
-    )
+    scalar_input_size = 1 + cfg.environment.food_track_limit * 3 + 1 + 1 + 5 + 1
 
     try:
         for update in range(total_updates):
@@ -1575,7 +1589,9 @@ def train(total_updates=1000, output_model=None):
                 scalar_input_size,
             )
 
-            actions = actions.reshape(cfg.training.rollout_length * cfg.training.num_envs, 2)
+            actions = actions.reshape(
+                cfg.training.rollout_length * cfg.training.num_envs, 2
+            )
 
             old_log_probs = old_log_probs.reshape(-1)
             rewards_np = rewards.numpy()
@@ -1609,7 +1625,9 @@ def train(total_updates=1000, output_model=None):
             dataset_size = cfg.training.rollout_length * cfg.training.num_envs
             indices = np.arange(dataset_size)
 
-            minibatches_per_epoch = math.ceil(dataset_size / cfg.training.minibatch_size)
+            minibatches_per_epoch = math.ceil(
+                dataset_size / cfg.training.minibatch_size
+            )
             total_minibatches = cfg.training.ppo_epochs * minibatches_per_epoch
             minibatch_counter = 0
             backprop_start_time = time.time()
@@ -1920,7 +1938,12 @@ def build_parser():
         description="Virtual Butterfly RL agent",
     )
 
-    parser.add_argument("--config", type=str, default=None, help="Path to TOML config file (default: butterfly.toml)")
+    parser.add_argument(
+        "--config",
+        type=str,
+        default=None,
+        help="Path to TOML config file (default: butterfly.toml)",
+    )
 
     parser.add_argument("--mode", choices=["train", "run", "play"], default="train")
 
@@ -1964,7 +1987,9 @@ def build_parser():
         group = parser.add_argument_group(group_name)
         for dest in _CONFIG_ARG_DESTS[group_name]:
             arg_type = _CONFIG_ARG_TYPES[dest]
-            group.add_argument(f"--{dest.replace('_', '-')}", type=arg_type, default=None)
+            group.add_argument(
+                f"--{dest.replace('_', '-')}", type=arg_type, default=None
+            )
 
     world = parser.add_argument_group("world")
     world.add_argument(
@@ -2009,14 +2034,12 @@ if __name__ == "__main__":
     cfg.set_from_args(cli_overrides)
 
     # Recalculate SCALAR_INPUT_SIZE for convenience
-    SCALAR_INPUT_SIZE = (
-        1 + cfg.environment.food_track_limit * 3 + 1 + 1 + 5 + 1
-    )
+    SCALAR_INPUT_SIZE = 1 + cfg.environment.food_track_limit * 3 + 1 + 1 + 5 + 1
 
     seed_everything(args.seed)
 
     if DEVICE == "cpu":
-        thread_count = args.threads if args.threads is not None else os.cpu_count()
+        thread_count = args.threads if args.threads is not None else os.cpu_count() or 1
         torch.set_num_threads(thread_count)
         print(f"CPU device: using {thread_count} torch threads.")
 
