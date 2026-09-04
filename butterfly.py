@@ -25,7 +25,7 @@ MAX_STEPS = 500
 FOOD_COUNT = 12
 HISTORY_LENGTH = 8
 
-NUM_ENVS = 16
+NUM_ENVS = 8
 ROLLOUT_LENGTH = 128
 PPO_EPOCHS = 4
 MINIBATCH_SIZE = 256
@@ -136,6 +136,28 @@ def create_model_filename():
     git_label = get_git_model_label()
 
     return MODEL_DIR / (f"{timestamp}_{git_label}_butterfly.pt")
+
+
+def newest_model():
+    """
+    Returns the most recently modified *_butterfly.pt file in MODEL_DIR.
+
+    Raises FileNotFoundError if no model files exist.
+    """
+
+    if not MODEL_DIR.exists():
+        raise FileNotFoundError(f"Model directory does not exist: {MODEL_DIR}")
+
+    candidates = sorted(
+        MODEL_DIR.glob("*_butterfly.pt"),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+
+    if not candidates:
+        raise FileNotFoundError(f"No model files found in: {MODEL_DIR}")
+
+    return candidates[0]
 
 
 # ============================================================
@@ -631,7 +653,6 @@ def train(total_updates=1000, output_model=None):
     print(f"Model will be saved to: {output_model}")
     envs = [ButterflyEnv(seed=i) for i in range(NUM_ENVS)]
 
-    observations = []
     histories = []
 
     for env in envs:
@@ -641,7 +662,6 @@ def train(total_updates=1000, output_model=None):
         history = HistoryBuffer()
         history.reset(observation, scalar_input)
 
-        observations.append(observation)
         histories.append(history)
 
     policy = ButterflyPolicy().to(DEVICE)
@@ -677,7 +697,6 @@ def train(total_updates=1000, output_model=None):
 
             actions_np = actions.cpu().numpy()
 
-            next_observations = []
             step_rewards = []
             step_dones = []
 
@@ -687,6 +706,9 @@ def train(total_updates=1000, output_model=None):
                 )
 
                 done = terminated or truncated
+
+                step_rewards.append(reward)
+                step_dones.append(float(done))
 
                 if done:
                     next_observation = env.reset()
@@ -863,9 +885,11 @@ def play(weights=None):
 
             action = action[0].cpu().numpy()
 
-            next_observation, reward, terminated, truncated, info = env.step(action)
+            next_observation, next_scalars, reward, terminated, truncated, info = (
+                env.step(action)
+            )
 
-            history.append(next_observation)
+            history.append(next_observation, next_scalars)
             done = terminated or truncated
 
             if done:
