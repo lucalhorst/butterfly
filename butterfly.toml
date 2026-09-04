@@ -66,5 +66,7 @@ transformer_dropout     = 0.1
 transformer_layers      = 3
 
 [rendering]
-window_size = 600
-play_seed   = 123
+window_size            = 600
+play_seed              = 123
+window_view_radius     = 1.5
+butterfly_vision_radius = 0.5

@@ -94,6 +94,8 @@ _DEFAULTS = {
     "rendering": {
         "window_size": 600,
         "play_seed": 123,
+        "window_view_radius": 1.5,
+        "butterfly_vision_radius": 0.5,
     },
 }
 
@@ -547,6 +549,33 @@ class WorldManager:
 
         return visible
 
+    def get_all_plants_with_state(self, butterfly_world_pos, current_step):
+        plants = []
+
+        for chunk_pos, chunk in self.loaded_chunks.items():
+            chunk_origin_x = chunk_pos[0] * cfg.world.chunk_size
+            chunk_origin_y = chunk_pos[1] * cfg.world.chunk_size
+
+            for plant in chunk.plants:
+                world_pos = np.array(
+                    [
+                        chunk_origin_x + plant["local_pos"][0],
+                        chunk_origin_y + plant["local_pos"][1],
+                    ],
+                    dtype=np.float32,
+                )
+
+                plants.append(
+                    {
+                        "world_pos": world_pos,
+                        "type": plant["type"],
+                        "is_active": self._check_plant_active(plant, current_step),
+                        "plant_ref": plant,
+                    }
+                )
+
+        return plants
+
     def _check_plant_active(self, plant, current_step):
         if current_step < plant["cooldown_until"]:
             return False
@@ -911,23 +940,39 @@ class ButterflyEnv:
 
         self.window.fill(bg_color)
 
-        visible_plants = self.world.get_visible_plants(
+        px_per_unit = half / cfg.rendering.window_view_radius
+
+        all_plants = self.world.get_all_plants_with_state(
             self.butterfly_world_pos, self.time_step
         )
 
-        for plant_info in visible_plants:
+        for plant_info in all_plants:
             relative = plant_info["world_pos"] - self.butterfly_world_pos
-            screen_x = half + int(relative[0] * half)
-            screen_y = half + int(relative[1] * half)
+            screen_x = half + int(relative[0] * px_per_unit)
+            screen_y = half + int(relative[1] * px_per_unit)
 
             if 0 <= screen_x < window_size and 0 <= screen_y < window_size:
-                color = self._get_plant_color_pygame(plant_info["type"])
-                pygame.draw.circle(self.window, color, (screen_x, screen_y), 7)
+                if plant_info["is_active"]:
+                    color = self._get_plant_color_pygame(plant_info["type"])
+                    radius = 7
+                else:
+                    color = self._get_plant_color_pygame(
+                        plant_info["type"], dim_factor=0.35
+                    )
+                    radius = 4
+                pygame.draw.circle(self.window, color, (screen_x, screen_y), radius)
+
+        vision_radius_px = int(
+            cfg.rendering.butterfly_vision_radius * px_per_unit
+        )
+        pygame.draw.circle(
+            self.window, (110, 110, 110), (half, half), vision_radius_px, width=1
+        )
 
         if self.bird is not None:
             bird_relative = self.bird.pos - self.butterfly_world_pos
-            bird_x = half + int(bird_relative[0] * half)
-            bird_y = half + int(bird_relative[1] * half)
+            bird_x = half + int(bird_relative[0] * px_per_unit)
+            bird_y = half + int(bird_relative[1] * px_per_unit)
 
             if 0 <= bird_x < window_size and 0 <= bird_y < window_size:
                 pygame.draw.circle(self.window, (200, 30, 30), (bird_x, bird_y), 10)
@@ -994,14 +1039,15 @@ class ButterflyEnv:
         pygame.display.flip()
         self.clock.tick(60)
 
-    def _get_plant_color_pygame(self, plant_type):
+    def _get_plant_color_pygame(self, plant_type, dim_factor=1.0):
         colors = {
             "day": (255, 200, 30),
             "night": (80, 30, 200),
             "interval": (30, 200, 200),
             "random": (200, 80, 200),
         }
-        return colors.get(plant_type, (255, 255, 255))
+        base = colors.get(plant_type, (255, 255, 255))
+        return tuple(int(channel * dim_factor) for channel in base)
 
 
 # ============================================================
