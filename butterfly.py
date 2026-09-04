@@ -1,7 +1,9 @@
 import argparse
 import math
+import multiprocessing as mp
 import random
 import subprocess
+import sys
 from collections import deque
 from datetime import datetime
 from pathlib import Path
@@ -25,7 +27,7 @@ MAX_STEPS = 500
 FOOD_COUNT = 12
 HISTORY_LENGTH = 8
 
-NUM_ENVS = 8
+NUM_ENVS = 4
 ROLLOUT_LENGTH = 128
 PPO_EPOCHS = 4
 MINIBATCH_SIZE = 256
@@ -61,6 +63,23 @@ def seed_everything(seed):
 
 def clamp(value, low, high):
     return max(low, min(high, value))
+
+
+def print_progress_bar(current, total, prefix="", bar_length=30):
+    """
+    Prints a single-line, in-place progress bar using carriage returns.
+    Call once per step; call print() (or otherwise emit a newline)
+    after the loop finishes so subsequent output starts on a fresh line.
+    """
+
+    fraction = current / total if total else 1.0
+    fraction = clamp(fraction, 0.0, 1.0)
+
+    filled = int(bar_length * fraction)
+    bar = "#" * filled + "-" * (bar_length - filled)
+
+    sys.stdout.write(f"\r{prefix}[{bar}] {current}/{total}")
+    sys.stdout.flush()
 
 
 def run_git_command(*args):
@@ -170,8 +189,18 @@ class ButterflyEnv:
     A simple 2D world.
 
     The butterfly must search for flowers and collect nectar.
-    Observation: RGB image from the butterfly's point of view.
-    Action: [horizontal movement, vertical movement]
+    Observation: RGB image from the butterfly's point of view, PLUS a
+    scalar vector of hunger + angle/distance to nearby food.
+
+    NOTE (documented tradeoff, not a bug): the image and scalar
+    observations are largely redundant -- both encode the relative
+    position of nearby food, just in different formats. This is kept
+    intentionally (it can help the visual encoder learn useful
+    features, and mirrors how partial/full-precision sensors might
+    coexist in a real system) rather than "fixed", since collapsing
+    them into one modality would change the task itself. Worth
+    knowing if you're debugging why the two encoders learn similar
+    things.
     """
 
     def __init__(self, seed=None, render=False):
@@ -203,8 +232,12 @@ class ButterflyEnv:
 
         self.collected = 0
         self.steps = 0
+        self.hunger = INITIAL_HUNGER
 
-        return self.render_observation()
+        observation = self.render_observation()
+        scalar_inputs = self.get_scalar_inputs()
+
+        return observation, scalar_inputs
 
     def step(self, action):
         self.steps += 1
@@ -402,6 +435,107 @@ class ButterflyEnv:
 
 
 # ============================================================
+# Multiprocessing environment workers
+#
+# Each worker owns one ButterflyEnv in its own process, so env
+# stepping (numpy work, image rendering) actually happens in
+# parallel instead of a sequential Python loop across 16 envs.
+# ============================================================
+
+
+def _env_worker(remote, seed):
+    env = ButterflyEnv(seed=seed, render=False)
+
+    try:
+        while True:
+            command, payload = remote.recv()
+
+            if command == "reset":
+                observation, scalars = env.reset()
+
+                remote.send((observation, scalars))
+
+            elif command == "step":
+                observation, scalars, reward, terminated, truncated, info = env.step(
+                    payload
+                )
+
+                if terminated or truncated:
+                    # Stash the true terminal observation/scalars so the
+                    # main process can bootstrap the value function for
+                    # time-limit truncations (see compute_gae / train()).
+                    info = dict(info)
+                    info["terminal_observation"] = observation
+                    info["terminal_scalars"] = scalars
+
+                    observation, scalars = env.reset()
+
+                remote.send((observation, scalars, reward, terminated, truncated, info))
+
+            elif command == "close":
+                remote.close()
+                break
+
+            else:
+                raise ValueError(f"Unknown worker command: {command}")
+
+    except (EOFError, KeyboardInterrupt):
+        pass
+
+
+class SubprocVecEnv:
+    """
+    Runs one ButterflyEnv per worker process for true parallelism.
+
+    Uses the default multiprocessing start method (fork on Linux),
+    guarded by the __main__ check at the bottom of this file.
+    """
+
+    def __init__(self, seeds):
+        self.num_envs = len(seeds)
+
+        self.remotes, worker_remotes = zip(*[mp.Pipe() for _ in seeds])
+
+        self.processes = []
+
+        for worker_remote, seed in zip(worker_remotes, seeds):
+            process = mp.Process(
+                target=_env_worker,
+                args=(worker_remote, seed),
+                daemon=True,
+            )
+            process.start()
+            self.processes.append(process)
+
+            # The main process doesn't need its own handle to the
+            # worker's end of the pipe.
+            worker_remote.close()
+
+    def reset(self):
+        for remote in self.remotes:
+            remote.send(("reset", None))
+
+        results = [remote.recv() for remote in self.remotes]
+
+        observations, scalars = zip(*results)
+
+        return list(observations), list(scalars)
+
+    def step(self, actions):
+        for remote, action in zip(self.remotes, actions):
+            remote.send(("step", action))
+
+        return [remote.recv() for remote in self.remotes]
+
+    def close(self):
+        for remote in self.remotes:
+            remote.send(("close", None))
+
+        for process in self.processes:
+            process.join()
+
+
+# ============================================================
 # ResNet visual encoder
 # ============================================================
 
@@ -470,6 +604,16 @@ class ButterflyPolicy(nn.Module):
             nn.ReLU(),
         )
 
+        # Fuse visual and scalar features via concatenation + a learned
+        # projection, instead of adding them. Addition forces both
+        # modalities into the same 256-dim subspace with no way to
+        # learn how to weight/mix them; concatenation lets the
+        # network learn that mixing.
+        self.fusion = nn.Sequential(
+            nn.Linear(feature_size * 2, feature_size),
+            nn.ReLU(),
+        )
+
         self.position_embedding = nn.Parameter(
             torch.zeros(1, history_length, feature_size)
         )
@@ -518,8 +662,10 @@ class ButterflyPolicy(nn.Module):
 
         scalar_features = self.scalar_encoder(scalar_sequence)
 
-        # Fuse visual and hunger/food information.
-        combined_features = image_features + scalar_features
+        # Concatenate along the feature dim, then project back down to
+        # feature_size with a learned layer (see self.fusion above).
+        combined_features = torch.cat([image_features, scalar_features], dim=-1)
+        combined_features = self.fusion(combined_features)
 
         return combined_features
 
@@ -530,6 +676,12 @@ class ButterflyPolicy(nn.Module):
 
         features = features + self.position_embedding[:, :sequence_length]
 
+        # NOTE: this causal mask has no effect on correctness as written,
+        # since only the *last* timestep's transformer output is ever
+        # consumed below (current_state = transformed[:, -1]) -- a token
+        # can attend to itself and everything before it either way. It's
+        # kept here because it's harmless and would matter if this policy
+        # is ever extended to consume outputs from multiple timesteps.
         causal_mask = torch.triu(
             torch.ones(sequence_length, sequence_length, device=features.device),
             diagonal=1,
@@ -614,6 +766,23 @@ class HistoryBuffer:
 
         return images, scalars
 
+    def terminal_tensors(self, terminal_observation, terminal_scalars):
+        """
+        Builds the history tensors as they would look one step past the
+        current buffer, ending in the true terminal observation/scalars
+        (i.e. before the episode-end auto-reset). Used only to bootstrap
+        the value function on time-limit truncations. Does not mutate
+        this buffer.
+        """
+
+        images = list(self.image_buffer)[1:] + [terminal_observation]
+        scalars = list(self.scalar_buffer)[1:] + [terminal_scalars]
+
+        images = torch.tensor(np.stack(images), dtype=torch.float32)
+        scalars = torch.tensor(np.stack(scalars), dtype=torch.float32)
+
+        return images, scalars
+
 
 # ============================================================
 # PPO training
@@ -621,6 +790,15 @@ class HistoryBuffer:
 
 
 def compute_gae(rewards, values, dones):
+    """
+    dones marks any episode boundary (terminated OR truncated). For
+    truncated episodes, train() has already added a bootstrapped
+    gamma * V(s_terminal) term onto the reward at that step (see
+    train()), so treating truncation and termination identically here
+    is correct: the bootstrap information is already folded into
+    `rewards` rather than needing a second "next value" lookup.
+    """
+
     advantages = np.zeros_like(rewards, dtype=np.float32)
     last_advantage = 0.0
 
@@ -651,14 +829,14 @@ def train(total_updates=1000, output_model=None):
 
     print(f"Training on device: {DEVICE}")
     print(f"Model will be saved to: {output_model}")
-    envs = [ButterflyEnv(seed=i) for i in range(NUM_ENVS)]
+
+    vec_env = SubprocVecEnv(seeds=list(range(NUM_ENVS)))
+
+    observations, scalars = vec_env.reset()
 
     histories = []
 
-    for env in envs:
-        observation = env.reset()
-        scalar_input = env.get_scalar_inputs()
-
+    for observation, scalar_input in zip(observations, scalars):
         history = HistoryBuffer()
         history.reset(observation, scalar_input)
 
@@ -667,179 +845,215 @@ def train(total_updates=1000, output_model=None):
     policy = ButterflyPolicy().to(DEVICE)
     optimizer = optim.Adam(policy.parameters(), lr=LEARNING_RATE)
 
-    for update in range(total_updates):
-        rollout_images = []
-        rollout_scalars = []
-        rollout_actions = []
-        rollout_log_probs = []
-        rollout_rewards = []
-        rollout_values = []
-        rollout_dones = []
+    try:
+        for update in range(total_updates):
+            rollout_images = []
+            rollout_scalars = []
+            rollout_actions = []
+            rollout_log_probs = []
+            rollout_rewards = []
+            rollout_values = []
+            rollout_dones = []
 
-        for step in range(ROLLOUT_LENGTH):
-            batch_images = []
-            batch_scalars = []
-
-            for history in histories:
-                images, scalars = history.tensors()
-
-                batch_images.append(images)
-                batch_scalars.append(scalars)
-
-            batch_images = torch.stack(batch_images).to(DEVICE)
-
-            batch_scalars = torch.stack(batch_scalars).to(DEVICE)
-
-            with torch.no_grad():
-                actions, log_probs, values = policy.sample_action(
-                    batch_images, batch_scalars
+            for step in range(ROLLOUT_LENGTH):
+                print_progress_bar(
+                    step + 1,
+                    ROLLOUT_LENGTH,
+                    prefix=f"Update {update:05d}/{total_updates} rollout ",
                 )
 
-            actions_np = actions.cpu().numpy()
+                batch_images = []
+                batch_scalars = []
 
-            step_rewards = []
-            step_dones = []
+                for history in histories:
+                    images, scalars_tensor = history.tensors()
 
-            for i, env in enumerate(envs):
-                next_observation, next_scalars, reward, terminated, truncated, info = (
-                    env.step(actions_np[i])
-                )
+                    batch_images.append(images)
+                    batch_scalars.append(scalars_tensor)
 
-                done = terminated or truncated
+                batch_images = torch.stack(batch_images).to(DEVICE)
 
-                step_rewards.append(reward)
-                step_dones.append(float(done))
+                batch_scalars = torch.stack(batch_scalars).to(DEVICE)
 
-                if done:
-                    next_observation = env.reset()
-                    next_scalars = env.get_scalar_inputs()
+                with torch.no_grad():
+                    actions, log_probs, values = policy.sample_action(
+                        batch_images, batch_scalars
+                    )
 
-                    histories[i].reset(next_observation, next_scalars)
-                else:
-                    histories[i].append(next_observation, next_scalars)
+                actions_np = actions.cpu().numpy()
 
-            rollout_images.append(batch_images.cpu())
+                step_results = vec_env.step(list(actions_np))
 
-            rollout_scalars.append(batch_scalars.cpu())
-            rollout_actions.append(actions.cpu())
-            rollout_log_probs.append(log_probs.cpu())
-            rollout_rewards.append(torch.tensor(step_rewards, dtype=torch.float32))
-            rollout_values.append(values.cpu())
-            rollout_dones.append(torch.tensor(step_dones, dtype=torch.float32))
-        images = torch.stack(rollout_images)
-        scalars = torch.stack(rollout_scalars)
-        actions = torch.stack(rollout_actions)
-        old_log_probs = torch.stack(rollout_log_probs)
-        rewards = torch.stack(rollout_rewards)
-        values = torch.stack(rollout_values)
-        dones = torch.stack(rollout_dones)
+                step_rewards = []
+                step_dones = []
 
-        images = images.reshape(
-            ROLLOUT_LENGTH * NUM_ENVS, HISTORY_LENGTH, 3, IMAGE_SIZE, IMAGE_SIZE
-        )
+                for i, (
+                    next_observation,
+                    next_scalars,
+                    reward,
+                    terminated,
+                    truncated,
+                    info,
+                ) in enumerate(step_results):
+                    done = terminated or truncated
 
-        scalars = scalars.reshape(
-            ROLLOUT_LENGTH * NUM_ENVS, HISTORY_LENGTH, SCALAR_INPUT_SIZE
-        )
+                    if done and truncated and not terminated:
+                        # Time-limit cutoff, not a "real" ending: bootstrap
+                        # using the value network's estimate of the true
+                        # terminal state, instead of letting GAE treat this
+                        # like the episode's return is exactly 0 afterward.
+                        terminal_images, terminal_scalars = histories[
+                            i
+                        ].terminal_tensors(
+                            info["terminal_observation"], info["terminal_scalars"]
+                        )
 
-        actions = actions.reshape(ROLLOUT_LENGTH * NUM_ENVS, 2)
+                        with torch.no_grad():
+                            _, _, bootstrap_value = policy.forward(
+                                terminal_images.unsqueeze(0).to(DEVICE),
+                                terminal_scalars.unsqueeze(0).to(DEVICE),
+                            )
 
-        old_log_probs = old_log_probs.reshape(-1)
-        rewards_np = rewards.numpy()
-        values_np = values.numpy()
-        dones_np = dones.numpy()
+                        reward = reward + GAMMA * bootstrap_value.item()
 
-        advantages = []
-        returns = []
+                    step_rewards.append(reward)
+                    step_dones.append(float(done))
 
-        for env_index in range(NUM_ENVS):
-            env_rewards = rewards_np[:, env_index]
-            env_values = values_np[:, env_index]
-            env_dones = dones_np[:, env_index]
+                    if done:
+                        histories[i].reset(next_observation, next_scalars)
+                    else:
+                        histories[i].append(next_observation, next_scalars)
 
-            env_advantages, env_returns = compute_gae(
-                env_rewards, env_values, env_dones
+                rollout_images.append(batch_images.cpu())
+
+                rollout_scalars.append(batch_scalars.cpu())
+                rollout_actions.append(actions.cpu())
+                rollout_log_probs.append(log_probs.cpu())
+                rollout_rewards.append(torch.tensor(step_rewards, dtype=torch.float32))
+                rollout_values.append(values.cpu())
+                rollout_dones.append(torch.tensor(step_dones, dtype=torch.float32))
+
+            print()  # move past the in-place rollout progress bar
+
+            images = torch.stack(rollout_images)
+            scalars_tensor = torch.stack(rollout_scalars)
+            actions = torch.stack(rollout_actions)
+            old_log_probs = torch.stack(rollout_log_probs)
+            rewards = torch.stack(rollout_rewards)
+            values = torch.stack(rollout_values)
+            dones = torch.stack(rollout_dones)
+
+            images = images.reshape(
+                ROLLOUT_LENGTH * NUM_ENVS, HISTORY_LENGTH, 3, IMAGE_SIZE, IMAGE_SIZE
             )
 
-            advantages.append(env_advantages)
-            returns.append(env_returns)
-
-        advantages = np.stack(advantages, axis=1)
-        returns = np.stack(returns, axis=1)
-
-        advantages = torch.tensor(advantages.reshape(-1), dtype=torch.float32)
-
-        returns = torch.tensor(returns.reshape(-1), dtype=torch.float32)
-
-        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-
-        dataset_size = ROLLOUT_LENGTH * NUM_ENVS
-        indices = np.arange(dataset_size)
-
-        for _ in range(PPO_EPOCHS):
-            np.random.shuffle(indices)
-
-            for start in range(0, dataset_size, MINIBATCH_SIZE):
-                batch_indices = indices[start : start + MINIBATCH_SIZE]
-
-                batch_images = images[batch_indices].to(DEVICE)
-                batch_scalars = scalars[batch_indices].to(DEVICE)
-                batch_actions = actions[batch_indices].to(DEVICE)
-                batch_old_log_probs = old_log_probs[batch_indices].to(DEVICE)
-                batch_advantages = advantages[batch_indices].to(DEVICE)
-                batch_returns = returns[batch_indices].to(DEVICE)
-
-                new_log_probs, entropy, new_values = policy.evaluate_actions(
-                    batch_images, batch_scalars, batch_actions
-                )
-
-                ratio = (new_log_probs - batch_old_log_probs).exp()
-
-                unclipped = ratio * batch_advantages
-                clipped = (
-                    ratio.clamp(1.0 - CLIP_EPSILON, 1.0 + CLIP_EPSILON)
-                    * batch_advantages
-                )
-
-                policy_loss = -torch.min(unclipped, clipped).mean()
-
-                value_loss = (batch_returns - new_values).pow(2).mean()
-
-                entropy_loss = -entropy.mean()
-
-                loss = (
-                    policy_loss + VALUE_COEF * value_loss + ENTROPY_COEF * entropy_loss
-                )
-
-                optimizer.zero_grad()
-                loss.backward()
-
-                torch.nn.utils.clip_grad_norm_(policy.parameters(), max_norm=0.5)
-
-                optimizer.step()
-
-        if update % 10 == 0:
-            average_reward = rewards.mean().item()
-            average_value = values.mean().item()
-            average_advantage = advantages.mean().item()
-
-            print(
-                f"Update {update:05d}/{total_updates} | "
-                f"reward={average_reward: .4f} | "
-                f"value={average_value: .4f} | "
-                f"advantage={average_advantage: .4f} | "
-                f"loss={loss.item(): .4f}"
+            scalars_tensor = scalars_tensor.reshape(
+                ROLLOUT_LENGTH * NUM_ENVS, HISTORY_LENGTH, SCALAR_INPUT_SIZE
             )
 
-        if update % 100 == 0:
-            torch.save(policy.state_dict(), output_model)
-            print(f"Checkpoint saved: {output_model}")
+            actions = actions.reshape(ROLLOUT_LENGTH * NUM_ENVS, 2)
 
-    torch.save(policy.state_dict(), output_model)
+            old_log_probs = old_log_probs.reshape(-1)
+            rewards_np = rewards.numpy()
+            values_np = values.numpy()
+            dones_np = dones.numpy()
 
-    print()
-    print("Training complete.")
-    print(f"Saved model: {output_model}")
+            advantages = []
+            returns = []
+
+            for env_index in range(NUM_ENVS):
+                env_rewards = rewards_np[:, env_index]
+                env_values = values_np[:, env_index]
+                env_dones = dones_np[:, env_index]
+
+                env_advantages, env_returns = compute_gae(
+                    env_rewards, env_values, env_dones
+                )
+
+                advantages.append(env_advantages)
+                returns.append(env_returns)
+
+            advantages = np.stack(advantages, axis=1)
+            returns = np.stack(returns, axis=1)
+
+            advantages = torch.tensor(advantages.reshape(-1), dtype=torch.float32)
+
+            returns = torch.tensor(returns.reshape(-1), dtype=torch.float32)
+
+            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+
+            dataset_size = ROLLOUT_LENGTH * NUM_ENVS
+            indices = np.arange(dataset_size)
+
+            for _ in range(PPO_EPOCHS):
+                np.random.shuffle(indices)
+
+                for start in range(0, dataset_size, MINIBATCH_SIZE):
+                    batch_indices = indices[start : start + MINIBATCH_SIZE]
+
+                    batch_images = images[batch_indices].to(DEVICE)
+                    batch_scalars = scalars_tensor[batch_indices].to(DEVICE)
+                    batch_actions = actions[batch_indices].to(DEVICE)
+                    batch_old_log_probs = old_log_probs[batch_indices].to(DEVICE)
+                    batch_advantages = advantages[batch_indices].to(DEVICE)
+                    batch_returns = returns[batch_indices].to(DEVICE)
+
+                    new_log_probs, entropy, new_values = policy.evaluate_actions(
+                        batch_images, batch_scalars, batch_actions
+                    )
+
+                    ratio = (new_log_probs - batch_old_log_probs).exp()
+
+                    unclipped = ratio * batch_advantages
+                    clipped = (
+                        ratio.clamp(1.0 - CLIP_EPSILON, 1.0 + CLIP_EPSILON)
+                        * batch_advantages
+                    )
+
+                    policy_loss = -torch.min(unclipped, clipped).mean()
+
+                    value_loss = (batch_returns - new_values).pow(2).mean()
+
+                    entropy_loss = -entropy.mean()
+
+                    loss = (
+                        policy_loss
+                        + VALUE_COEF * value_loss
+                        + ENTROPY_COEF * entropy_loss
+                    )
+
+                    optimizer.zero_grad()
+                    loss.backward()
+
+                    torch.nn.utils.clip_grad_norm_(policy.parameters(), max_norm=0.5)
+
+                    optimizer.step()
+
+            if update % 10 == 0:
+                average_reward = rewards.mean().item()
+                average_value = values.mean().item()
+                average_advantage = advantages.mean().item()
+
+                print(
+                    f"Update {update:05d}/{total_updates} | "
+                    f"reward={average_reward: .4f} | "
+                    f"value={average_value: .4f} | "
+                    f"advantage={average_advantage: .4f} | "
+                    f"loss={loss.item(): .4f}"
+                )
+
+            if update % 100 == 0:
+                torch.save(policy.state_dict(), output_model)
+                print(f"Checkpoint saved: {output_model}")
+
+        torch.save(policy.state_dict(), output_model)
+
+        print()
+        print("Training complete.")
+        print(f"Saved model: {output_model}")
+
+    finally:
+        vec_env.close()
 
 
 # ============================================================
@@ -866,8 +1080,7 @@ def play(weights=None):
     policy.eval()
 
     while env.render_enabled:
-        observation = env.reset()
-        scalar_input = env.get_scalar_inputs()
+        observation, scalar_input = env.reset()
 
         history = HistoryBuffer()
         history.reset(observation, scalar_input)
