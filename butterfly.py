@@ -654,6 +654,7 @@ class ButterflyEnv:
         self.clock = None
         self.font = None
         self.show_full_stats = False
+        self.display_mode = "overview"
         self.display_stats = {}
 
     def reset(self):
@@ -932,6 +933,12 @@ class ButterflyEnv:
             elif event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_TAB:
                     self.show_full_stats = not self.show_full_stats
+                elif event.key == pygame.K_v:
+                    self.display_mode = (
+                        "butterfly"
+                        if self.display_mode == "overview"
+                        else "overview"
+                    )
 
         if self.is_daytime:
             bg_color = (20, 80, 30)
@@ -939,6 +946,20 @@ class ButterflyEnv:
             bg_color = (10, 20, 40)
 
         self.window.fill(bg_color)
+
+        if self.display_mode == "butterfly":
+            self._render_butterfly_view()
+        else:
+            self._render_overview()
+
+        self._draw_hud()
+
+        pygame.display.flip()
+        self.clock.tick(60)
+
+    def _render_overview(self):
+        window_size = cfg.rendering.window_size
+        half = window_size // 2
 
         px_per_unit = half / cfg.rendering.window_view_radius
 
@@ -962,13 +983,6 @@ class ButterflyEnv:
                     radius = 4
                 pygame.draw.circle(self.window, color, (screen_x, screen_y), radius)
 
-        vision_radius_px = int(
-            cfg.rendering.butterfly_vision_radius * px_per_unit
-        )
-        pygame.draw.circle(
-            self.window, (110, 110, 110), (half, half), vision_radius_px, width=1
-        )
-
         if self.bird is not None:
             bird_relative = self.bird.pos - self.butterfly_world_pos
             bird_x = half + int(bird_relative[0] * px_per_unit)
@@ -983,6 +997,32 @@ class ButterflyEnv:
         pygame.draw.circle(self.window, (240, 70, 220), (bx + 10, by), 10)
         pygame.draw.circle(self.window, (30, 20, 30), (bx, by), 5)
 
+        vision_radius_px = int(
+            cfg.rendering.butterfly_vision_radius * px_per_unit
+        )
+
+        overlay = pygame.Surface((window_size, window_size), pygame.SRCALPHA)
+        overlay.fill((110, 110, 110, 170))
+        pygame.draw.circle(overlay, (0, 0, 0, 0), (half, half), vision_radius_px)
+        self.window.blit(overlay, (0, 0))
+
+        pygame.draw.circle(
+            self.window, (200, 200, 200), (half, half), vision_radius_px, width=1
+        )
+
+    def _render_butterfly_view(self):
+        window_size = cfg.rendering.window_size
+
+        observation = self.render_observation()
+        image = np.clip(np.moveaxis(observation, 0, -1), 0.0, 1.0)
+        image = (image * 255).astype(np.uint8)
+
+        surf = pygame.surfarray.make_surface(image)
+        surf = pygame.transform.scale(surf, (window_size, window_size))
+
+        self.window.blit(surf, (0, 0))
+
+    def _draw_hud(self):
         y_off = 10
 
         hunger_color = (
@@ -993,7 +1033,19 @@ class ButterflyEnv:
 
         time_str = "Day" if self.is_daytime else "Night"
         cycle_pos = self.time_step % cfg.world.day_cycle_length
+        zoom = cfg.rendering.window_view_radius / max(
+            cfg.rendering.butterfly_vision_radius, 1e-6
+        )
         lines = [
+            (
+                f"View: {'Butterfly' if self.display_mode == 'butterfly' else 'Overview'}",
+                (180, 180, 220),
+            ),
+            (
+                f"Zoom: {'native (1:1)' if self.display_mode == 'butterfly' else f'{zoom:.1f}x'}",
+                (180, 180, 220),
+            ),
+            ("V: toggle view", (140, 140, 140)),
             (f"Hunger: {self.hunger:.2f}", hunger_color),
             (f"Food: {self.collected} collected", (220, 220, 220)),
             (
@@ -1035,9 +1087,6 @@ class ButterflyEnv:
             surf = self.font.render(text, True, color)
             self.window.blit(surf, (10, y_off))
             y_off += 20
-
-        pygame.display.flip()
-        self.clock.tick(60)
 
     def _get_plant_color_pygame(self, plant_type, dim_factor=1.0):
         colors = {
