@@ -18,9 +18,9 @@ image_size                = 64
 max_steps                 = 10000
 history_length            = 8
 food_track_limit          = 15
-food_detection_radius     = 0.45
+food_detection_radius     = 1.0
 initial_hunger            = 1.0
-hunger_depletion_per_step = 0.0002
+hunger_depletion_per_step = 0.002
 food_hunger_restore       = 0.35
 butterfly_speed           = 0.035
 
