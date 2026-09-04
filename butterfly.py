@@ -1013,7 +1013,10 @@ class ButterflyEnv:
 # ============================================================
 
 
-def _env_worker(remote, seed):
+def _env_worker(remote, seed, config_dict):
+    global cfg
+    cfg = Config(config_dict)
+
     env = ButterflyEnv(seed=seed, render=False)
 
     try:
@@ -1061,17 +1064,19 @@ class SubprocVecEnv:
     guarded by the __main__ check at the bottom of this file.
     """
 
-    def __init__(self, seeds):
+    def __init__(self, seeds, config):
         self.num_envs = len(seeds)
 
         self.remotes, worker_remotes = zip(*[mp.Pipe() for _ in seeds])
 
         self.processes = []
 
+        config_dict = config.to_dict()
+
         for worker_remote, seed in zip(worker_remotes, seeds):
             process = mp.Process(
                 target=_env_worker,
-                args=(worker_remote, seed),
+                args=(worker_remote, seed, config_dict),
                 daemon=True,
             )
             process.start()
@@ -1457,7 +1462,7 @@ def train(total_updates=1000, output_model=None):
     print(f"Training on device: {DEVICE}")
     print(f"Model will be saved to: {output_model}")
 
-    vec_env = SubprocVecEnv(seeds=list(range(cfg.training.num_envs)))
+    vec_env = SubprocVecEnv(seeds=list(range(cfg.training.num_envs)), config=cfg)
 
     observations, scalars = vec_env.reset()
 
