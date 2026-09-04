@@ -11,7 +11,7 @@ value_coef          = 0.5
 num_envs            = 4
 gradient_max_norm   = 0.5
 checkpoint_interval = 5
-log_interval        = 2
+log_interval        = 5
 
 [environment]
 image_size                = 64

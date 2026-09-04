@@ -1637,6 +1637,11 @@ def train(total_updates=1000, output_model=None):
             minibatch_counter = 0
             backprop_start_time = time.time()
 
+            policy_losses = []
+            value_losses = []
+            entropy_losses = []
+            total_losses = []
+
             for _ in range(cfg.training.ppo_epochs):
                 np.random.shuffle(indices)
 
@@ -1693,6 +1698,11 @@ def train(total_updates=1000, output_model=None):
                         policy.parameters(), max_norm=cfg.training.gradient_max_norm
                     )
 
+                    policy_losses.append(policy_loss.item())
+                    value_losses.append(value_loss.item())
+                    entropy_losses.append(entropy_loss.item())
+                    total_losses.append(loss.item())
+
                     optimizer.step()
 
             print()  # move past the in-place backprop progress bar
@@ -1701,13 +1711,25 @@ def train(total_updates=1000, output_model=None):
                 average_reward = rewards.mean().item()
                 average_value = values.mean().item()
                 average_advantage = advantages.mean().item()
+                average_reward = rewards.mean().item()
+                average_value = values.mean().item()
+                average_advantage = advantages.mean().item()
+
+                avg_total_loss = float(np.mean(total_losses))
+                avg_policy_loss = float(np.mean(policy_losses))
+                avg_value_loss = float(np.mean(value_losses))
+                avg_entropy_loss = float(np.mean(entropy_losses))
+
+                action_saturation = (actions.abs() > 0.99).float().mean().item()
 
                 print(
                     f"Update {update:05d}/{total_updates} | "
                     f"reward={average_reward: .4f} | "
                     f"value={average_value: .4f} | "
                     f"advantage={average_advantage: .4f} | "
-                    f"loss={loss.item(): .4f}",
+                    f"loss={avg_total_loss: .4f} "
+                    f"(policy={avg_policy_loss: .4f}, value={avg_value_loss: .4f}, entropy={avg_entropy_loss: .4f}) | "
+                    f"action_sat={action_saturation:.1%}",
                 )
 
             if update % cfg.training.checkpoint_interval == 0:
