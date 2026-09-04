@@ -1452,7 +1452,7 @@ def compute_gae(rewards, values, dones):
     return advantages, returns
 
 
-def train(total_updates=1000, output_model=None):
+def train(total_updates=1000, output_model=None, resume_from=None):
     if output_model is None:
         output_model = create_model_filename()
     else:
@@ -1476,6 +1476,35 @@ def train(total_updates=1000, output_model=None):
 
     policy = ButterflyPolicy().to(DEVICE)
     optimizer = optim.Adam(policy.parameters(), lr=cfg.training.learning_rate)
+
+    if resume_from is not None:
+        resume_path = Path(resume_from)
+
+        if not resume_path.exists():
+            raise FileNotFoundError(f"Resume checkpoint does not exist: {resume_path}")
+
+        checkpoint = torch.load(resume_path, map_location=DEVICE)
+
+        if isinstance(checkpoint, dict) and "policy" in checkpoint:
+            policy.load_state_dict(checkpoint["policy"])
+            optimizer.load_state_dict(checkpoint["optimizer"])
+            print(f"Resumed policy + optimizer state from: {resume_path}")
+        else:
+            # Backward compatibility: older checkpoints were a raw
+            # policy state_dict with no optimizer state saved, so the
+            # optimizer just starts fresh.
+            policy.load_state_dict(checkpoint)
+            print(
+                f"Resumed policy weights only from: {resume_path} "
+                "(older checkpoint format has no optimizer state; "
+                "optimizer starts fresh)"
+            )
+
+        # Note: the update counter always restarts at 0 on resume (this
+        # only affects logging/checkpoint-interval cadence), and rollout
+        # history buffers, env state, and RNG streams are NOT restored --
+        # a resumed run starts collecting fresh trajectories against the
+        # loaded weights.
 
     scalar_input_size = 1 + cfg.environment.food_track_limit * 3 + 1 + 1 + 5 + 1
 
@@ -1698,19 +1727,16 @@ def train(total_updates=1000, output_model=None):
                         policy.parameters(), max_norm=cfg.training.gradient_max_norm
                     )
 
+                    optimizer.step()
+
                     policy_losses.append(policy_loss.item())
                     value_losses.append(value_loss.item())
                     entropy_losses.append(entropy_loss.item())
                     total_losses.append(loss.item())
 
-                    optimizer.step()
-
             print()  # move past the in-place backprop progress bar
 
             if update % cfg.training.log_interval == 0:
-                average_reward = rewards.mean().item()
-                average_value = values.mean().item()
-                average_advantage = advantages.mean().item()
                 average_reward = rewards.mean().item()
                 average_value = values.mean().item()
                 average_advantage = advantages.mean().item()
@@ -1728,21 +1754,34 @@ def train(total_updates=1000, output_model=None):
                     f"value={average_value: .4f} | "
                     f"advantage={average_advantage: .4f} | "
                     f"loss={avg_total_loss: .4f} "
-                    f"(policy={avg_policy_loss: .4f}, value={avg_value_loss: .4f}, entropy={avg_entropy_loss: .4f}) | "
+                    f"(policy={avg_policy_loss: .4f}, value={avg_value_loss: .4f}, "
+                    f"entropy={avg_entropy_loss: .4f}) | "
                     f"action_sat={action_saturation:.1%}",
                 )
 
             if update % cfg.training.checkpoint_interval == 0:
-                torch.save(policy.state_dict(), output_model)
+                torch.save(
+                    {
+                        "policy": policy.state_dict(),
+                        "optimizer": optimizer.state_dict(),
+                    },
+                    output_model,
+                )
                 print(f"Checkpoint saved: {output_model}")
 
-        torch.save(policy.state_dict(), output_model)
+        torch.save(
+            {"policy": policy.state_dict(), "optimizer": optimizer.state_dict()},
+            output_model,
+        )
 
         print()
         print("Training complete.")
         print(f"Saved model: {output_model}")
     except KeyboardInterrupt:
-        torch.save(policy.state_dict(), output_model)
+        torch.save(
+            {"policy": policy.state_dict(), "optimizer": optimizer.state_dict()},
+            output_model,
+        )
 
         print()
         print("Training incomplete, but exiting on request")
@@ -1771,7 +1810,14 @@ def play(weights=None):
     env = ButterflyEnv(seed=cfg.rendering.play_seed, render=True)
     policy = ButterflyPolicy().to(DEVICE)
 
-    policy.load_state_dict(torch.load(weights, map_location=DEVICE))
+    checkpoint = torch.load(weights, map_location=DEVICE)
+
+    if isinstance(checkpoint, dict) and "policy" in checkpoint:
+        policy.load_state_dict(checkpoint["policy"])
+    else:
+        # Backward compatibility: older checkpoints were a raw policy
+        # state_dict rather than a {"policy": ..., "optimizer": ...} dict.
+        policy.load_state_dict(checkpoint)
 
     policy.eval()
 
@@ -1986,6 +2032,17 @@ def build_parser():
         ),
     )
 
+    parser.add_argument(
+        "--resume",
+        type=str,
+        default=None,
+        help=(
+            "Path to a checkpoint to resume training from (restores "
+            "policy weights and optimizer state). Only used with "
+            "--mode train. The update counter always restarts at 0."
+        ),
+    )
+
     parser.add_argument("--seed", type=int, default=42)
 
     parser.add_argument(
@@ -2072,7 +2129,7 @@ if __name__ == "__main__":
 
     try:
         if args.mode == "train":
-            train(total_updates=args.updates)
+            train(total_updates=args.updates, resume_from=args.resume)
         elif args.mode in ["run", "play"]:
             play(weights=args.weights)
     except KeyboardInterrupt:
