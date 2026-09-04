@@ -1120,7 +1120,7 @@ def train(total_updates=1000, output_model=None):
                     f"loss={loss.item(): .4f}",
                 )
 
-            if update % 100 == 0:
+            if update % 10 == 0:
                 torch.save(policy.state_dict(), output_model)
                 print(f"Checkpoint saved: {output_model}")
 
@@ -1129,7 +1129,13 @@ def train(total_updates=1000, output_model=None):
         print()
         print("Training complete.")
         print(f"Saved model: {output_model}")
+    except KeyboardInterrupt:
+        torch.save(policy.state_dict(), output_model)
 
+        print()
+        print("Training incomplete, but exiting on request")
+        print(f"Saved model: {output_model}")
+        raise
     finally:
         vec_env.close()
 
