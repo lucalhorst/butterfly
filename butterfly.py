@@ -516,9 +516,9 @@ class ButterflyEnv:
 
         self.world.update(self.butterfly_world_pos)
 
-        bird_spawn = self.rng.uniform(
-            -CHUNK_SIZE, CHUNK_SIZE, size=2
-        ).astype(np.float32)
+        bird_spawn = self.rng.uniform(-CHUNK_SIZE, CHUNK_SIZE, size=2).astype(
+            np.float32
+        )
         self.bird = Bird(bird_spawn, self.rng)
 
         observation = self.render_observation()
@@ -633,7 +633,13 @@ class ButterflyEnv:
             bird_detected = 1.0 if b_dist < 1.0 else 0.0
 
         bird_input = np.array(
-            [bird_angle, bird_dist, bird_state_roam, bird_state_chase, bird_state_return],
+            [
+                bird_angle,
+                bird_dist,
+                bird_state_roam,
+                bird_state_chase,
+                bird_state_return,
+            ],
             dtype=np.float32,
         )
         bird_detected_input = np.array([bird_detected], dtype=np.float32)
@@ -667,7 +673,14 @@ class ButterflyEnv:
         food_inputs = np.asarray(food_inputs, dtype=np.float32)
 
         return np.concatenate(
-            [hunger, food_inputs, time_input, is_day_input, bird_input, bird_detected_input]
+            [
+                hunger,
+                food_inputs,
+                time_input,
+                is_day_input,
+                bird_input,
+                bird_detected_input,
+            ]
         )
 
     def render_observation(self):
@@ -693,15 +706,15 @@ class ButterflyEnv:
 
             if 2 <= pixel_x < IMAGE_SIZE - 2 and 2 <= pixel_y < IMAGE_SIZE - 2:
                 color = self._get_plant_color(plant_info["type"])
-                image[
-                    0, pixel_y - 2 : pixel_y + 3, pixel_x - 2 : pixel_x + 3
-                ] = color[0]
-                image[
-                    1, pixel_y - 2 : pixel_y + 3, pixel_x - 2 : pixel_x + 3
-                ] = color[1]
-                image[
-                    2, pixel_y - 2 : pixel_y + 3, pixel_x - 2 : pixel_x + 3
-                ] = color[2]
+                image[0, pixel_y - 2 : pixel_y + 3, pixel_x - 2 : pixel_x + 3] = color[
+                    0
+                ]
+                image[1, pixel_y - 2 : pixel_y + 3, pixel_x - 2 : pixel_x + 3] = color[
+                    1
+                ]
+                image[2, pixel_y - 2 : pixel_y + 3, pixel_x - 2 : pixel_x + 3] = color[
+                    2
+                ]
 
         if self.bird is not None:
             bird_relative = self.bird.pos - self.butterfly_world_pos
@@ -709,15 +722,9 @@ class ButterflyEnv:
             bird_py = int(IMAGE_SIZE / 2 + bird_relative[1] * IMAGE_SIZE)
 
             if 0 <= bird_px < IMAGE_SIZE and 0 <= bird_py < IMAGE_SIZE:
-                image[
-                    0, bird_py - 1 : bird_py + 2, bird_px - 1 : bird_px + 2
-                ] = 0.8
-                image[
-                    1, bird_py - 1 : bird_py + 2, bird_px - 1 : bird_px + 2
-                ] = 0.1
-                image[
-                    2, bird_py - 1 : bird_py + 2, bird_px - 1 : bird_px + 2
-                ] = 0.1
+                image[0, bird_py - 1 : bird_py + 2, bird_px - 1 : bird_px + 2] = 0.8
+                image[1, bird_py - 1 : bird_py + 2, bird_px - 1 : bird_px + 2] = 0.1
+                image[2, bird_py - 1 : bird_py + 2, bird_px - 1 : bird_px + 2] = 0.1
 
         center = IMAGE_SIZE // 2
         image[0, center - 2 : center + 3, center - 2 : center + 3] = 0.9
