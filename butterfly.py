@@ -1,6 +1,7 @@
 import argparse
 import math
 import random
+import subprocess
 from collections import deque
 from datetime import datetime
 from pathlib import Path
@@ -62,22 +63,79 @@ def clamp(value, low, high):
     return max(low, min(high, value))
 
 
+def run_git_command(*args):
+    try:
+        result = subprocess.run(
+            ["git", *args],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+
+        return result.stdout.strip()
+
+    except (
+        subprocess.CalledProcessError,
+        FileNotFoundError,
+    ):
+        return None
+
+
+def get_git_model_label():
+    """
+    Examples:
+
+        v1.4.0
+        v1.4.0_dirty
+        a1b2c3d
+        a1b2c3d_dirty
+        nogit
+    """
+
+    # Prefer an exact tag on the current commit.
+    git_tag = run_git_command(
+        "describe",
+        "--tags",
+        "--exact-match",
+        "--abbrev=0",
+    )
+
+    if git_tag:
+        label = git_tag
+    else:
+        # Fall back to the short commit hash.
+        git_hash = run_git_command(
+            "rev-parse",
+            "--short",
+            "HEAD",
+        )
+
+        label = git_hash if git_hash else "nogit"
+
+    # Include staged, unstaged, and untracked-file changes.
+    status = run_git_command(
+        "status",
+        "--porcelain",
+    )
+
+    if status:
+        label += "_dirty"
+
+    # Avoid characters that are awkward in filenames.
+    label = label.replace("/", "-")
+    label = label.replace(" ", "-")
+
+    return label
+
+
 def create_model_filename():
-    MODEL_DIR.mkdir(exist_ok=True)
+    MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    return MODEL_DIR / f"{timestamp}_butterfly.pt"
 
+    git_label = get_git_model_label()
 
-def newest_model():
-    MODEL_DIR.mkdir(exist_ok=True)
-
-    models = list(MODEL_DIR.glob("*_butterfly.pt"))
-
-    if not models:
-        raise FileNotFoundError(f"No butterfly models found in {MODEL_DIR.resolve()}")
-
-    return max(models, key=lambda path: path.stat().st_mtime)
+    return MODEL_DIR / (f"{timestamp}_{git_label}_butterfly.pt")
 
 
 # ============================================================
