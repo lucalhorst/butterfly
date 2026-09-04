@@ -1,0 +1,10 @@
+# Butterfly RL - GPU tier: ~4GB VRAM
+# Target hardware examples: GTX 1650, RTX 3050 laptop, MX-series
+# Network architecture and image_size are left at defaults on purpose.
+
+[training]
+num_envs            = 8
+rollout_length      = 128
+minibatch_size      = 128
+checkpoint_interval = 10
+log_interval        = 5

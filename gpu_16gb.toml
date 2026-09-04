@@ -1,0 +1,10 @@
+# Butterfly RL - GPU tier: ~16GB VRAM
+# Target hardware examples: RTX 4080, RTX 4070 Ti Super, A4000
+# Network architecture and image_size are left at defaults on purpose.
+
+[training]
+num_envs            = 32
+rollout_length      = 512
+minibatch_size      = 512
+checkpoint_interval = 15
+log_interval        = 5
