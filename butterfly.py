@@ -472,16 +472,28 @@ class ButterflyEnv:
 
         lines = [
             (f"Hunger: {self.hunger:.2f}", hunger_color),
-            (f"Food: {self.collected} collected, {len(self.food)} left", (220, 220, 220)),
+            (
+                f"Food: {self.collected} collected, {len(self.food)} left",
+                (220, 220, 220),
+            ),
         ]
 
         if self.show_full_stats:
             lines.append((f"Step: {self.steps}/{MAX_STEPS}", (180, 180, 180)))
-            lines.append((f"Reward: {self.display_stats.get('cumulative_reward', 0.0):.2f}", (180, 180, 180)))
-            lines.append((f"Value: {self.display_stats.get('value', 0.0):.3f}", (180, 180, 180)))
+            lines.append(
+                (
+                    f"Reward: {self.display_stats.get('cumulative_reward', 0.0):.2f}",
+                    (180, 180, 180),
+                )
+            )
+            lines.append(
+                (f"Value: {self.display_stats.get('value', 0.0):.3f}", (180, 180, 180))
+            )
             action = self.display_stats.get("action", None)
             if action is not None:
-                lines.append((f"Action: [{action[0]:+.3f}, {action[1]:+.3f}]", (180, 180, 180)))
+                lines.append(
+                    (f"Action: [{action[0]:+.3f}, {action[1]:+.3f}]", (180, 180, 180))
+                )
             lines.append(("TAB: hide full stats", (100, 100, 100)))
         else:
             lines.append(("TAB: full stats", (100, 100, 100)))
