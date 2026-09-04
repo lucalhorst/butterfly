@@ -27,7 +27,7 @@ MAX_STEPS = 500
 FOOD_COUNT = 12
 HISTORY_LENGTH = 8
 
-NUM_ENVS = 4
+NUM_ENVS = 16
 ROLLOUT_LENGTH = 128
 PPO_EPOCHS = 4
 MINIBATCH_SIZE = 256
@@ -985,10 +985,22 @@ def train(total_updates=1000, output_model=None):
             dataset_size = ROLLOUT_LENGTH * NUM_ENVS
             indices = np.arange(dataset_size)
 
+            minibatches_per_epoch = math.ceil(dataset_size / MINIBATCH_SIZE)
+            total_minibatches = PPO_EPOCHS * minibatches_per_epoch
+            minibatch_counter = 0
+
             for _ in range(PPO_EPOCHS):
                 np.random.shuffle(indices)
 
                 for start in range(0, dataset_size, MINIBATCH_SIZE):
+                    minibatch_counter += 1
+
+                    print_progress_bar(
+                        minibatch_counter,
+                        total_minibatches,
+                        prefix=f"Update {update:05d}/{total_updates} backprop ",
+                    )
+
                     batch_indices = indices[start : start + MINIBATCH_SIZE]
 
                     batch_images = images[batch_indices].to(DEVICE)
@@ -1028,6 +1040,8 @@ def train(total_updates=1000, output_model=None):
                     torch.nn.utils.clip_grad_norm_(policy.parameters(), max_norm=0.5)
 
                     optimizer.step()
+
+            print()  # move past the in-place backprop progress bar
 
             if update % 10 == 0:
                 average_reward = rewards.mean().item()
