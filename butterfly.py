@@ -25,18 +25,13 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 IMAGE_SIZE = 64
 WORLD_SIZE = 1.0
 
-MAX_STEPS = 500
-FOOD_COUNT = 12
+MAX_STEPS = 10000
 HISTORY_LENGTH = 8
 
 NUM_ENVS = 16
-# Lowered from 128/256: halves per-update compute (dataset_size and
-# minibatch count scale directly with these). Also halves the rollout
-# batch PPO's advantage/return estimates are computed from -- still a
-# standard size, just smaller.
-ROLLOUT_LENGTH = 64
+ROLLOUT_LENGTH = 256
 PPO_EPOCHS = 4
-MINIBATCH_SIZE = 128
+MINIBATCH_SIZE = 256
 
 GAMMA = 0.99
 GAE_LAMBDA = 0.95
@@ -47,14 +42,30 @@ VALUE_COEF = 0.5
 
 MODEL_DIR = Path("models")
 
-FOOD_TRACK_LIMIT = 10
+FOOD_TRACK_LIMIT = 15
 FOOD_DETECTION_RADIUS = 0.45
 
 INITIAL_HUNGER = 1.0
-HUNGER_DEPLETION_PER_STEP = 0.002
+HUNGER_DEPLETION_PER_STEP = 0.0002
 FOOD_HUNGER_RESTORE = 0.35
 
-SCALAR_INPUT_SIZE = 1 + FOOD_TRACK_LIMIT * 2
+CHUNK_SIZE = 16
+CHUNKS_LOADED = 2
+PLANTS_PER_CHUNK = 20
+DAY_CYCLE_LENGTH = 100
+DAY_DURATION = 50
+NIGHT_DURATION = 50
+PLANT_COOLDOWN = 25
+INTERVAL_PHASES_MAX = 3
+BIRD_SPEED = 0.025
+BIRD_DETECTION_RANGE = 0.3
+BIRD_CHASE_SPEED = 0.035
+BIRD_PATROL_RANGE = 2.0
+
+PLANT_TYPES = ["day", "night", "interval", "random"]
+PLANT_TYPE_PROBS = [0.35, 0.35, 0.2, 0.1]
+
+SCALAR_INPUT_SIZE = 1 + FOOD_TRACK_LIMIT * 3 + 1 + 1 + 5 + 1
 
 # ============================================================
 # Utility functions
@@ -201,42 +212,288 @@ def newest_model():
 
 
 # ============================================================
+# Bird entity
+# ============================================================
+
+
+class BirdState:
+    ROAM = "roam"
+    CHASE = "chase"
+    RETURN = "return"
+
+
+class Bird:
+    def __init__(self, spawn_pos, rng):
+        self.pos = spawn_pos.copy().astype(np.float32)
+        self.spawn_pos = spawn_pos.copy().astype(np.float32)
+        self.state = BirdState.ROAM
+        self.rng = rng
+        self.target_pos = None
+
+    def update(self, butterfly_pos):
+        if self.state == BirdState.ROAM:
+            return self._do_roam(butterfly_pos)
+        elif self.state == BirdState.CHASE:
+            return self._do_chase(butterfly_pos)
+        elif self.state == BirdState.RETURN:
+            return self._do_return()
+        return None
+
+    def _do_roam(self, butterfly_pos):
+        if self.target_pos is None or self._reached_target():
+            angle = self.rng.uniform(0, 2 * math.pi)
+            dist = self.rng.uniform(0, BIRD_PATROL_RANGE)
+            self.target_pos = self.spawn_pos + np.array(
+                [dist * math.cos(angle), dist * math.sin(angle)], dtype=np.float32
+            )
+
+        direction = self.target_pos - self.pos
+        dist = float(np.linalg.norm(direction))
+
+        if dist > 0.1:
+            self.pos += (direction / dist) * BIRD_SPEED
+
+        dist_to_butterfly = float(np.linalg.norm(butterfly_pos - self.pos))
+        if dist_to_butterfly < BIRD_DETECTION_RANGE:
+            self.state = BirdState.CHASE
+
+        return None
+
+    def _do_chase(self, butterfly_pos):
+        direction = butterfly_pos - self.pos
+        dist = float(np.linalg.norm(direction))
+
+        if dist > 0.05:
+            self.pos += (direction / dist) * BIRD_CHASE_SPEED
+
+        if dist < 0.05:
+            self.state = BirdState.RETURN
+            return "kill"
+
+        if dist > BIRD_DETECTION_RANGE * 2:
+            self.state = BirdState.RETURN
+
+        return None
+
+    def _do_return(self):
+        direction = self.spawn_pos - self.pos
+        dist = float(np.linalg.norm(direction))
+
+        if dist > 0.5:
+            self.pos += (direction / dist) * BIRD_SPEED
+        else:
+            self.state = BirdState.ROAM
+            self.target_pos = None
+
+        return None
+
+    def _reached_target(self):
+        if self.target_pos is None:
+            return True
+        return float(np.linalg.norm(self.target_pos - self.pos)) < 0.5
+
+    def get_relative_info(self, butterfly_pos):
+        offset = self.pos - butterfly_pos
+        distance = float(np.linalg.norm(offset))
+        angle = math.atan2(float(offset[1]), float(offset[0])) / math.pi
+        normalized_dist = min(distance / (BIRD_DETECTION_RANGE * 2), 1.0)
+        return angle, normalized_dist, self.state
+
+
+# ============================================================
+# Chunk and world system
+# ============================================================
+
+
+class Chunk:
+    def __init__(self, chunk_x, chunk_y):
+        self.chunk_x = chunk_x
+        self.chunk_y = chunk_y
+        self.plants = self._generate_plants()
+
+    def _generate_plants(self):
+        plants = []
+        chunk_seed = hash((self.chunk_x, self.chunk_y)) % (2**31)
+        chunk_rng = np.random.default_rng(chunk_seed)
+
+        for _ in range(PLANTS_PER_CHUNK):
+            local_pos = chunk_rng.uniform(0, CHUNK_SIZE, size=2).astype(np.float32)
+
+            plant_type = chunk_rng.choice(PLANT_TYPES, p=PLANT_TYPE_PROBS)
+
+            plant = {
+                "type": plant_type,
+                "local_pos": local_pos,
+                "active": True,
+                "cooldown_until": 0,
+            }
+
+            if plant_type == "interval":
+                num_phases = int(chunk_rng.integers(1, INTERVAL_PHASES_MAX + 1))
+                plant["phases"] = []
+                for _ in range(num_phases):
+                    start = int(chunk_rng.integers(0, DAY_CYCLE_LENGTH))
+                    duration = int(chunk_rng.integers(5, 20))
+                    plant["phases"].append((start, duration))
+            elif plant_type == "random":
+                plant["appear_prob"] = float(chunk_rng.uniform(0.01, 0.05))
+                plant["disappear_prob"] = float(chunk_rng.uniform(0.01, 0.05))
+                plant["active"] = bool(chunk_rng.random() < 0.5)
+
+            plants.append(plant)
+
+        return plants
+
+
+class WorldManager:
+    def __init__(self, rng):
+        self.rng = rng
+        self.loaded_chunks = {}
+        self.current_chunk = (0, 0)
+
+    def update(self, butterfly_world_pos):
+        chunk_x = int(math.floor(butterfly_world_pos[0] / CHUNK_SIZE))
+        chunk_y = int(math.floor(butterfly_world_pos[1] / CHUNK_SIZE))
+
+        self.current_chunk = (chunk_x, chunk_y)
+
+        needed_chunks = set()
+        half = CHUNKS_LOADED // 2
+        for dx in range(-half, half + 1):
+            for dy in range(-half, half + 1):
+                needed_chunks.add((chunk_x + dx, chunk_y + dy))
+
+        to_remove = [k for k in self.loaded_chunks if k not in needed_chunks]
+        for k in to_remove:
+            del self.loaded_chunks[k]
+
+        for chunk_pos in needed_chunks:
+            if chunk_pos not in self.loaded_chunks:
+                self.loaded_chunks[chunk_pos] = Chunk(chunk_pos[0], chunk_pos[1])
+
+    def get_all_plants(self, butterfly_world_pos):
+        all_plants = []
+
+        for chunk_pos, chunk in self.loaded_chunks.items():
+            chunk_origin_x = chunk_pos[0] * CHUNK_SIZE
+            chunk_origin_y = chunk_pos[1] * CHUNK_SIZE
+
+            for plant in chunk.plants:
+                world_pos = np.array(
+                    [
+                        chunk_origin_x + plant["local_pos"][0],
+                        chunk_origin_y + plant["local_pos"][1],
+                    ],
+                    dtype=np.float32,
+                )
+
+                all_plants.append(
+                    {
+                        "world_pos": world_pos,
+                        "type": plant["type"],
+                        "active": plant["active"],
+                        "plant_ref": plant,
+                    }
+                )
+
+        return all_plants
+
+    def get_visible_plants(self, butterfly_world_pos, current_step):
+        visible = []
+
+        for chunk_pos, chunk in self.loaded_chunks.items():
+            chunk_origin_x = chunk_pos[0] * CHUNK_SIZE
+            chunk_origin_y = chunk_pos[1] * CHUNK_SIZE
+
+            for plant in chunk.plants:
+                is_active = self._check_plant_active(plant, current_step)
+
+                if is_active:
+                    world_pos = np.array(
+                        [
+                            chunk_origin_x + plant["local_pos"][0],
+                            chunk_origin_y + plant["local_pos"][1],
+                        ],
+                        dtype=np.float32,
+                    )
+
+                    visible.append(
+                        {
+                            "world_pos": world_pos,
+                            "type": plant["type"],
+                            "plant_ref": plant,
+                        }
+                    )
+
+        return visible
+
+    def _check_plant_active(self, plant, current_step):
+        if current_step < plant["cooldown_until"]:
+            return False
+
+        step_in_cycle = current_step % DAY_CYCLE_LENGTH
+        is_daytime = step_in_cycle < DAY_DURATION
+
+        if plant["type"] == "day":
+            return is_daytime
+        elif plant["type"] == "night":
+            return not is_daytime
+        elif plant["type"] == "interval":
+            return self._check_interval_active(plant, step_in_cycle)
+        elif plant["type"] == "random":
+            return self._check_random_active(plant, current_step)
+
+        return False
+
+    def _check_interval_active(self, plant, step_in_cycle):
+        for start, duration in plant.get("phases", []):
+            end = (start + duration) % DAY_CYCLE_LENGTH
+            if start < end:
+                if start <= step_in_cycle < end:
+                    return True
+            else:
+                if step_in_cycle >= start or step_in_cycle < end:
+                    return True
+        return False
+
+    def _check_random_active(self, plant, current_step):
+        if plant["active"]:
+            if self.rng.random() < plant.get("disappear_prob", 0.02):
+                plant["active"] = False
+        else:
+            if self.rng.random() < plant.get("appear_prob", 0.02):
+                plant["active"] = True
+        return plant["active"]
+
+
+# ============================================================
 # Virtual butterfly environment
 # ============================================================
 
 
 class ButterflyEnv:
     """
-    A simple 2D world.
+    An open-world 2D environment with procedural chunk generation.
 
-    The butterfly must search for flowers and collect nectar.
-    Observation: RGB image from the butterfly's point of view, PLUS a
-    scalar vector of hunger + angle/distance to nearby food.
-
-    NOTE (documented tradeoff, not a bug): the image and scalar
-    observations are largely redundant -- both encode the relative
-    position of nearby food, just in different formats. This is kept
-    intentionally (it can help the visual encoder learn useful
-    features, and mirrors how partial/full-precision sensors might
-    coexist in a real system) rather than "fixed", since collapsing
-    them into one modality would change the task itself. Worth
-    knowing if you're debugging why the two encoders learn similar
-    things.
+    The butterfly searches for flowers in a world with day-night cycles,
+    multiple plant types, and a bird predator. Observation: RGB image
+    showing only eatable plants, plus scalar vector with all nearby
+    plants, time info, and bird proximity.
     """
 
     def __init__(self, seed=None, render=False):
         self.rng = np.random.default_rng(seed)
         self.render_enabled = render
 
-        self.width = 1.0
-        self.height = 1.0
-
         self.hunger = INITIAL_HUNGER
-
-        self.butterfly = np.zeros(2, dtype=np.float32)
-        self.food = []
+        self.butterfly_world_pos = np.zeros(2, dtype=np.float32)
         self.collected = 0
         self.steps = 0
+        self.time_step = 0
+        self.is_daytime = True
+
+        self.world = None
+        self.bird = None
 
         self.window = None
         self.clock = None
@@ -245,18 +502,24 @@ class ButterflyEnv:
         self.display_stats = {}
 
     def reset(self):
-        self.butterfly = self.rng.uniform(low=0.15, high=0.85, size=2).astype(
-            np.float32
-        )
-
-        self.food = [
-            self.rng.uniform(0.05, 0.95, size=2).astype(np.float32)
-            for _ in range(FOOD_COUNT)
-        ]
-
-        self.collected = 0
+        self.time_step = 0
+        self.is_daytime = True
         self.steps = 0
         self.hunger = INITIAL_HUNGER
+        self.collected = 0
+
+        self.world = WorldManager(self.rng)
+
+        self.butterfly_world_pos = self.rng.uniform(
+            -CHUNK_SIZE / 2, CHUNK_SIZE / 2, size=2
+        ).astype(np.float32)
+
+        self.world.update(self.butterfly_world_pos)
+
+        bird_spawn = self.rng.uniform(
+            -CHUNK_SIZE, CHUNK_SIZE, size=2
+        ).astype(np.float32)
+        self.bird = Bird(bird_spawn, self.rng)
 
         observation = self.render_observation()
         scalar_inputs = self.get_scalar_inputs()
@@ -265,58 +528,57 @@ class ButterflyEnv:
 
     def step(self, action):
         self.steps += 1
+        self.time_step += 1
+        self.is_daytime = (self.time_step % DAY_CYCLE_LENGTH) < DAY_DURATION
 
         action = np.asarray(action, dtype=np.float32)
         action = np.clip(action, -1.0, 1.0)
 
-        old_position = self.butterfly.copy()
+        old_position = self.butterfly_world_pos.copy()
 
         speed = 0.035
-        self.butterfly += action * speed
-        self.butterfly = np.clip(self.butterfly, 0.02, 0.98)
+        self.butterfly_world_pos += action * speed
 
-        # Hunger continuously depletes.
+        self.world.update(self.butterfly_world_pos)
+
+        visible_plants = self.world.get_visible_plants(
+            self.butterfly_world_pos, self.time_step
+        )
+
         self.hunger -= HUNGER_DEPLETION_PER_STEP
         self.hunger = max(0.0, self.hunger)
 
         reward = -0.002
 
-        movement = np.linalg.norm(self.butterfly - old_position)
-
+        movement = np.linalg.norm(self.butterfly_world_pos - old_position)
         reward += float(movement) * 0.02
 
-        remaining_food = []
-
-        for item in self.food:
-            distance = np.linalg.norm(self.butterfly - item)
-
+        for plant_info in visible_plants:
+            distance = np.linalg.norm(
+                self.butterfly_world_pos - plant_info["world_pos"]
+            )
             if distance < 0.055:
                 reward += 2.0
-
-                # Eating restores hunger.
                 self.hunger += FOOD_HUNGER_RESTORE
                 self.hunger = min(1.0, self.hunger)
-
                 self.collected += 1
-            else:
-                remaining_food.append(item)
 
-        self.food = remaining_food
+                plant_ref = plant_info["plant_ref"]
+                plant_ref["active"] = False
+                plant_ref["cooldown_until"] = self.time_step + PLANT_COOLDOWN
 
-        # End the episode when hunger reaches zero.
+        bird_result = self.bird.update(self.butterfly_world_pos)
+        bird_killed = bird_result == "kill"
+
         hunger_dead = self.hunger <= 0.0
-
-        # Successfully collecting all food also ends the episode.
-        all_food_collected = len(self.food) == 0
-
-        terminated = hunger_dead or all_food_collected
+        terminated = hunger_dead or bird_killed
         truncated = self.steps >= MAX_STEPS
 
         if hunger_dead:
             reward -= 5.0
 
-        if all_food_collected:
-            reward += 5.0
+        if bird_killed:
+            reward -= 10.0
 
         observation = self.render_observation()
         scalar_inputs = self.get_scalar_inputs()
@@ -332,98 +594,146 @@ class ButterflyEnv:
             truncated,
             {
                 "food_collected": self.collected,
-                "food_remaining": len(self.food),
                 "hunger": self.hunger,
-                "hunger_dead": hunger_dead,
+                "time_step": self.time_step,
+                "is_daytime": self.is_daytime,
+                "bird_state": self.bird.state,
+                "bird_killed": bird_killed,
             },
         )
 
     def get_scalar_inputs(self):
-        """
-        Returns:
-
-            hunger:
-                Normalized hunger value in [0, 1].
-
-            food_inputs:
-                Ten pairs of [angle, radius].
-
-                angle is normalized to [-1, 1].
-                radius is normalized to [0, 1].
-        """
-
         hunger = np.array([self.hunger], dtype=np.float32)
 
-        detectable_food = []
+        time_normalized = (self.time_step % DAY_CYCLE_LENGTH) / DAY_CYCLE_LENGTH
+        time_input = np.array([time_normalized], dtype=np.float32)
+        is_day_input = np.array([1.0 if self.is_daytime else 0.0], dtype=np.float32)
 
-        for food_position in self.food:
-            offset = food_position - self.butterfly
+        bird_angle = 0.0
+        bird_dist = 1.0
+        bird_state_roam = 1.0
+        bird_state_chase = 0.0
+        bird_state_return = 0.0
+        bird_detected = 0.0
+
+        if self.bird is not None:
+            b_angle, b_dist, b_state = self.bird.get_relative_info(
+                self.butterfly_world_pos
+            )
+            bird_angle = b_angle
+            bird_dist = b_dist
+
+            if b_state == BirdState.ROAM:
+                bird_state_roam = 1.0
+            elif b_state == BirdState.CHASE:
+                bird_state_chase = 1.0
+            elif b_state == BirdState.RETURN:
+                bird_state_return = 1.0
+
+            bird_detected = 1.0 if b_dist < 1.0 else 0.0
+
+        bird_input = np.array(
+            [bird_angle, bird_dist, bird_state_roam, bird_state_chase, bird_state_return],
+            dtype=np.float32,
+        )
+        bird_detected_input = np.array([bird_detected], dtype=np.float32)
+
+        all_plants = self.world.get_all_plants(self.butterfly_world_pos)
+
+        detectable_food = []
+        for plant_info in all_plants:
+            offset = plant_info["world_pos"] - self.butterfly_world_pos
             distance = float(np.linalg.norm(offset))
 
             if distance <= FOOD_DETECTION_RADIUS:
                 angle = math.atan2(float(offset[1]), float(offset[0]))
-
-                # Normalize angle from [-pi, pi] to [-1, 1].
                 normalized_angle = angle / math.pi
-
-                # Normalize radius from [0, detection radius] to [0, 1].
                 normalized_radius = distance / FOOD_DETECTION_RADIUS
+                is_eatable = 1.0 if plant_info["active"] else 0.0
+                detectable_food.append(
+                    (distance, normalized_angle, normalized_radius, is_eatable)
+                )
 
-                detectable_food.append((distance, normalized_angle, normalized_radius))
-
-        # Closest food first.
         detectable_food.sort(key=lambda item: item[0])
 
         food_inputs = []
-
         for i in range(FOOD_TRACK_LIMIT):
             if i < len(detectable_food):
-                _, angle, radius = detectable_food[i]
-
-                food_inputs.extend([angle, radius])
+                _, angle, radius, is_eatable = detectable_food[i]
+                food_inputs.extend([angle, radius, is_eatable])
             else:
-                # No food in this slot.
-                food_inputs.extend([0.0, 1.0])
+                food_inputs.extend([0.0, 1.0, 0.0])
 
         food_inputs = np.asarray(food_inputs, dtype=np.float32)
 
-        return np.concatenate([hunger, food_inputs])
+        return np.concatenate(
+            [hunger, food_inputs, time_input, is_day_input, bird_input, bird_detected_input]
+        )
 
     def render_observation(self):
-        """
-        Creates a top-down RGB image.
-
-        The butterfly is in the center of the image.
-        Food is represented as colored points relative to it.
-        """
         image = np.zeros((3, IMAGE_SIZE, IMAGE_SIZE), dtype=np.float32)
 
-        # Dark green background.
-        image[0, :, :] = 0.04
-        image[1, :, :] = 0.12
-        image[2, :, :] = 0.05
+        if self.is_daytime:
+            image[0, :, :] = 0.1
+            image[1, :, :] = 0.25
+            image[2, :, :] = 0.08
+        else:
+            image[0, :, :] = 0.02
+            image[1, :, :] = 0.05
+            image[2, :, :] = 0.12
 
-        # Draw food.
-        for item in self.food:
-            relative = item - self.butterfly
+        visible_plants = self.world.get_visible_plants(
+            self.butterfly_world_pos, self.time_step
+        )
 
-            # Local observation radius.
+        for plant_info in visible_plants:
+            relative = plant_info["world_pos"] - self.butterfly_world_pos
             pixel_x = int(IMAGE_SIZE / 2 + relative[0] * IMAGE_SIZE)
             pixel_y = int(IMAGE_SIZE / 2 + relative[1] * IMAGE_SIZE)
 
             if 2 <= pixel_x < IMAGE_SIZE - 2 and 2 <= pixel_y < IMAGE_SIZE - 2:
-                image[0, pixel_y - 2 : pixel_y + 3, pixel_x - 2 : pixel_x + 3] = 1.0
-                image[1, pixel_y - 2 : pixel_y + 3, pixel_x - 2 : pixel_x + 3] = 0.55
-                image[2, pixel_y - 2 : pixel_y + 3, pixel_x - 2 : pixel_x + 3] = 0.05
+                color = self._get_plant_color(plant_info["type"])
+                image[
+                    0, pixel_y - 2 : pixel_y + 3, pixel_x - 2 : pixel_x + 3
+                ] = color[0]
+                image[
+                    1, pixel_y - 2 : pixel_y + 3, pixel_x - 2 : pixel_x + 3
+                ] = color[1]
+                image[
+                    2, pixel_y - 2 : pixel_y + 3, pixel_x - 2 : pixel_x + 3
+                ] = color[2]
 
-        # Draw the butterfly at the center.
+        if self.bird is not None:
+            bird_relative = self.bird.pos - self.butterfly_world_pos
+            bird_px = int(IMAGE_SIZE / 2 + bird_relative[0] * IMAGE_SIZE)
+            bird_py = int(IMAGE_SIZE / 2 + bird_relative[1] * IMAGE_SIZE)
+
+            if 0 <= bird_px < IMAGE_SIZE and 0 <= bird_py < IMAGE_SIZE:
+                image[
+                    0, bird_py - 1 : bird_py + 2, bird_px - 1 : bird_px + 2
+                ] = 0.8
+                image[
+                    1, bird_py - 1 : bird_py + 2, bird_px - 1 : bird_px + 2
+                ] = 0.1
+                image[
+                    2, bird_py - 1 : bird_py + 2, bird_px - 1 : bird_px + 2
+                ] = 0.1
+
         center = IMAGE_SIZE // 2
         image[0, center - 2 : center + 3, center - 2 : center + 3] = 0.9
         image[1, center - 2 : center + 3, center - 2 : center + 3] = 0.2
         image[2, center - 2 : center + 3, center - 2 : center + 3] = 0.9
 
-        # Convert to HWC for pygame if necessary, but keep CHW for PyTorch.
         return image
+
+    def _get_plant_color(self, plant_type):
+        colors = {
+            "day": (1.0, 0.8, 0.1),
+            "night": (0.3, 0.1, 0.8),
+            "interval": (0.1, 0.8, 0.8),
+            "random": (0.8, 0.3, 0.8),
+        }
+        return colors.get(plant_type, (1.0, 1.0, 1.0))
 
     def render(self):
         if self.window is None:
@@ -445,23 +755,40 @@ class ButterflyEnv:
                 if event.key == pygame.K_TAB:
                     self.show_full_stats = not self.show_full_stats
 
-        self.window.fill((20, 60, 25))
+        if self.is_daytime:
+            bg_color = (20, 80, 30)
+        else:
+            bg_color = (10, 20, 40)
 
-        # Food.
-        for item in self.food:
-            x = int(item[0] * 600)
-            y = int(item[1] * 600)
-            pygame.draw.circle(self.window, (255, 190, 30), (x, y), 7)
+        self.window.fill(bg_color)
 
-        # Butterfly.
-        bx = int(self.butterfly[0] * 600)
-        by = int(self.butterfly[1] * 600)
+        visible_plants = self.world.get_visible_plants(
+            self.butterfly_world_pos, self.time_step
+        )
 
+        for plant_info in visible_plants:
+            relative = plant_info["world_pos"] - self.butterfly_world_pos
+            screen_x = 300 + int(relative[0] * 300)
+            screen_y = 300 + int(relative[1] * 300)
+
+            if 0 <= screen_x < 600 and 0 <= screen_y < 600:
+                color = self._get_plant_color_pygame(plant_info["type"])
+                pygame.draw.circle(self.window, color, (screen_x, screen_y), 7)
+
+        if self.bird is not None:
+            bird_relative = self.bird.pos - self.butterfly_world_pos
+            bird_x = 300 + int(bird_relative[0] * 300)
+            bird_y = 300 + int(bird_relative[1] * 300)
+
+            if 0 <= bird_x < 600 and 0 <= bird_y < 600:
+                pygame.draw.circle(self.window, (200, 30, 30), (bird_x, bird_y), 10)
+
+        bx = 300
+        by = 300
         pygame.draw.circle(self.window, (240, 70, 220), (bx - 10, by), 10)
         pygame.draw.circle(self.window, (240, 70, 220), (bx + 10, by), 10)
         pygame.draw.circle(self.window, (30, 20, 30), (bx, by), 5)
 
-        # --- Stats overlay ---
         y_off = 10
 
         hunger_color = (
@@ -470,12 +797,12 @@ class ButterflyEnv:
             50,
         )
 
+        time_str = "Day" if self.is_daytime else "Night"
+        cycle_pos = self.time_step % DAY_CYCLE_LENGTH
         lines = [
             (f"Hunger: {self.hunger:.2f}", hunger_color),
-            (
-                f"Food: {self.collected} collected, {len(self.food)} left",
-                (220, 220, 220),
-            ),
+            (f"Food: {self.collected} collected", (220, 220, 220)),
+            (f"Time: {time_str} ({cycle_pos}/{DAY_CYCLE_LENGTH})", (200, 200, 150)),
         ]
 
         if self.show_full_stats:
@@ -494,14 +821,14 @@ class ButterflyEnv:
                 lines.append(
                     (f"Action: [{action[0]:+.3f}, {action[1]:+.3f}]", (180, 180, 180))
                 )
+            bird_state_str = self.bird.state if self.bird else "N/A"
+            lines.append((f"Bird: {bird_state_str}", (200, 100, 100)))
             lines.append(("TAB: hide full stats", (100, 100, 100)))
         else:
             lines.append(("TAB: full stats", (100, 100, 100)))
 
-        # Hunger bar background.
         bar_x, bar_y, bar_w, bar_h = 10, y_off + len(lines) * 20 + 4, 120, 8
         pygame.draw.rect(self.window, (40, 40, 40), (bar_x, bar_y, bar_w, bar_h))
-        # Hunger bar fill.
         fill_w = int(bar_w * clamp(self.hunger, 0.0, 1.0))
         pygame.draw.rect(self.window, hunger_color, (bar_x, bar_y, fill_w, bar_h))
 
@@ -512,6 +839,15 @@ class ButterflyEnv:
 
         pygame.display.flip()
         self.clock.tick(60)
+
+    def _get_plant_color_pygame(self, plant_type):
+        colors = {
+            "day": (255, 200, 30),
+            "night": (80, 30, 200),
+            "interval": (30, 200, 200),
+            "random": (200, 80, 200),
+        }
+        return colors.get(plant_type, (255, 255, 255))
 
 
 # ============================================================
@@ -1261,7 +1597,9 @@ def play(weights=None):
                 print(
                     "Episode finished | "
                     f"food collected={info['food_collected']} | "
-                    f"food remaining={info['food_remaining']} | "
+                    f"hunger={info['hunger']:.2f} | "
+                    f"time_step={info['time_step']} | "
+                    f"bird_state={info['bird_state']} | "
                     f"total reward={cumulative_reward:.2f}"
                 )
 
