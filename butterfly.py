@@ -1,9 +1,11 @@
 import argparse
 import math
 import multiprocessing as mp
+import os
 import random
 import subprocess
 import sys
+import time
 from collections import deque
 from datetime import datetime
 from pathlib import Path
@@ -27,10 +29,14 @@ MAX_STEPS = 500
 FOOD_COUNT = 12
 HISTORY_LENGTH = 8
 
-NUM_ENVS = 8
-ROLLOUT_LENGTH = 128
+NUM_ENVS = 16
+# Lowered from 128/256: halves per-update compute (dataset_size and
+# minibatch count scale directly with these). Also halves the rollout
+# batch PPO's advantage/return estimates are computed from -- still a
+# standard size, just smaller.
+ROLLOUT_LENGTH = 64
 PPO_EPOCHS = 4
-MINIBATCH_SIZE = 256
+MINIBATCH_SIZE = 128
 
 GAMMA = 0.99
 GAE_LAMBDA = 0.95
@@ -65,11 +71,15 @@ def clamp(value, low, high):
     return max(low, min(high, value))
 
 
-def print_progress_bar(current, total, prefix="", bar_length=30):
+def print_progress_bar(current, total, prefix="", bar_length=30, start_time=None):
     """
     Prints a single-line, in-place progress bar using carriage returns.
     Call once per step; call print() (or otherwise emit a newline)
     after the loop finishes so subsequent output starts on a fresh line.
+
+    If start_time (a time.time() captured before the loop began) is
+    given, also shows elapsed time and an ETA for the remaining steps,
+    based on the current average rate.
     """
 
     fraction = current / total if total else 1.0
@@ -78,7 +88,18 @@ def print_progress_bar(current, total, prefix="", bar_length=30):
     filled = int(bar_length * fraction)
     bar = "#" * filled + "-" * (bar_length - filled)
 
-    sys.stdout.write(f"\r{prefix}[{bar}] {current}/{total}")
+    timing = ""
+
+    if start_time is not None:
+        elapsed = time.time() - start_time
+
+        if current > 0 and elapsed > 0:
+            rate = current / elapsed
+            remaining = (total - current) / rate if rate > 0 else 0.0
+
+            timing = f" | {elapsed:5.1f}s elapsed, ETA {remaining:5.1f}s"
+
+    sys.stdout.write(f"\r{prefix}[{bar}] {current}/{total}{timing}")
     sys.stdout.flush()
 
 
@@ -557,31 +578,69 @@ class ResidualBlock(nn.Module):
 
 
 class SmallResNet(nn.Module):
+    """
+    Channel widths halved from the original (32/64/128 -> 16/32/64).
+    Conv2d compute scales with in_channels * out_channels, so this cuts
+    convolution FLOPs roughly 4x -- the dominant cost in this whole
+    model on CPU, independent of env count or rollout/minibatch size.
+    """
+
     def __init__(self, feature_size=256):
         super().__init__()
 
         self.encoder = nn.Sequential(
-            nn.Conv2d(3, 32, 5, stride=2, padding=2),
+            nn.Conv2d(3, 16, 5, stride=2, padding=2),
+            nn.ReLU(),
+            ResidualBlock(16),
+            nn.Conv2d(16, 32, 3, stride=2, padding=1),
             nn.ReLU(),
             ResidualBlock(32),
             nn.Conv2d(32, 64, 3, stride=2, padding=1),
             nn.ReLU(),
             ResidualBlock(64),
-            nn.Conv2d(64, 128, 3, stride=2, padding=1),
-            nn.ReLU(),
-            ResidualBlock(128),
             nn.AdaptiveAvgPool2d((1, 1)),
         )
 
         self.projection = nn.Sequential(
             nn.Flatten(),
-            nn.Linear(128, feature_size),
+            nn.Linear(64, feature_size),
             nn.ReLU(),
         )
 
     def forward(self, x):
         x = self.encoder(x)
         return self.projection(x)
+
+
+def encode_images_deduped(visual_encoder, images):
+    """
+    images: [N, C, H, W] -- a flattened batch*history stack of frames
+    from a single minibatch forward pass.
+
+    Overlapping history windows from nearby samples in the same
+    minibatch can share identical raw frames (e.g. sample t's window
+    and sample t+1's window overlap in 7 of 8 frames). This finds
+    exact-duplicate frames within the minibatch, runs the (expensive)
+    visual_encoder on each unique frame only once, then scatters the
+    results back out to every original position.
+
+    This is "minibatch-local" dedup: it stays fully correct under PPO
+    (every minibatch still uses the current, un-cached weights -- no
+    gradient staleness), unlike caching features across minibatches or
+    epochs would. Because minibatches are randomly shuffled from the
+    whole rollout, the number of duplicate frames found here varies
+    run to run -- savings are real but modest, not a guaranteed 8x.
+    """
+
+    flat = images.reshape(images.shape[0], -1)
+
+    unique_flat, inverse_indices = torch.unique(flat, dim=0, return_inverse=True)
+
+    unique_images = unique_flat.reshape(-1, *images.shape[1:])
+
+    unique_features = visual_encoder(unique_images)
+
+    return unique_features[inverse_indices]
 
 
 # ============================================================
@@ -656,7 +715,7 @@ class ButterflyPolicy(nn.Module):
 
         images = image_sequence.reshape(batch_size * history, channels, height, width)
 
-        image_features = self.visual_encoder(images)
+        image_features = encode_images_deduped(self.visual_encoder, images)
 
         image_features = image_features.reshape(batch_size, history, -1)
 
@@ -855,11 +914,14 @@ def train(total_updates=1000, output_model=None):
             rollout_values = []
             rollout_dones = []
 
+            rollout_start_time = time.time()
+
             for step in range(ROLLOUT_LENGTH):
                 print_progress_bar(
                     step + 1,
                     ROLLOUT_LENGTH,
                     prefix=f"Update {update:05d}/{total_updates} rollout ",
+                    start_time=rollout_start_time,
                 )
 
                 batch_images = []
@@ -988,6 +1050,7 @@ def train(total_updates=1000, output_model=None):
             minibatches_per_epoch = math.ceil(dataset_size / MINIBATCH_SIZE)
             total_minibatches = PPO_EPOCHS * minibatches_per_epoch
             minibatch_counter = 0
+            backprop_start_time = time.time()
 
             for _ in range(PPO_EPOCHS):
                 np.random.shuffle(indices)
@@ -999,6 +1062,7 @@ def train(total_updates=1000, output_model=None):
                         minibatch_counter,
                         total_minibatches,
                         prefix=f"Update {update:05d}/{total_updates} backprop ",
+                        start_time=backprop_start_time,
                     )
 
                     batch_indices = indices[start : start + MINIBATCH_SIZE]
@@ -1150,9 +1214,26 @@ if __name__ == "__main__":
 
     parser.add_argument("--seed", type=int, default=42)
 
+    parser.add_argument(
+        "--threads",
+        type=int,
+        default=None,
+        help=(
+            "Number of CPU threads for torch to use (only relevant when "
+            "running without CUDA). Defaults to os.cpu_count(). Try your "
+            "physical core count (not hyperthreads) if unsure -- more "
+            "threads isn't always faster for this workload."
+        ),
+    )
+
     args = parser.parse_args()
 
     seed_everything(args.seed)
+
+    if DEVICE == "cpu":
+        thread_count = args.threads if args.threads is not None else os.cpu_count()
+        torch.set_num_threads(thread_count)
+        print(f"CPU device: using {thread_count} torch threads.")
 
     try:
         if args.mode == "train":
