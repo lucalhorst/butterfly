@@ -10,8 +10,8 @@ entropy_coef        = 0.01
 value_coef          = 0.5
 num_envs            = 4
 gradient_max_norm   = 0.5
-checkpoint_interval = 10
-log_interval        = 5
+checkpoint_interval = 5
+log_interval        = 2
 
 [environment]
 image_size                = 64
