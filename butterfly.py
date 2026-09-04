@@ -1117,7 +1117,8 @@ def train(total_updates=1000, output_model=None):
                     f"reward={average_reward: .4f} | "
                     f"value={average_value: .4f} | "
                     f"advantage={average_advantage: .4f} | "
-                    f"loss={loss.item(): .4f}"
+                    f"loss={loss.item(): .4f}",
+                    end="\n\n",
                 )
 
             if update % 100 == 0:
