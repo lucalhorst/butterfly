@@ -6,6 +6,7 @@ import random
 import subprocess
 import sys
 import time
+import tomllib
 from collections import deque
 from datetime import datetime
 from pathlib import Path
@@ -22,39 +23,146 @@ import torch.optim as optim
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-IMAGE_SIZE = 64
-WORLD_SIZE = 1.0
+_DEFAULTS = {
+    "training": {
+        "rollout_length": 256,
+        "ppo_epochs": 4,
+        "minibatch_size": 256,
+        "gamma": 0.99,
+        "gae_lambda": 0.95,
+        "clip_epsilon": 0.2,
+        "learning_rate": 3e-4,
+        "entropy_coef": 0.01,
+        "value_coef": 0.5,
+        "num_envs": 16,
+        "gradient_max_norm": 0.5,
+        "checkpoint_interval": 10,
+        "log_interval": 5,
+    },
+    "environment": {
+        "image_size": 64,
+        "max_steps": 10000,
+        "history_length": 8,
+        "food_track_limit": 15,
+        "food_detection_radius": 0.45,
+        "initial_hunger": 1.0,
+        "hunger_depletion_per_step": 0.0002,
+        "food_hunger_restore": 0.35,
+        "butterfly_speed": 0.035,
+        "rewards": {
+            "base_step": -0.002,
+            "movement_scale": 0.02,
+            "eating_distance": 0.055,
+            "eating_reward": 2.0,
+            "hunger_death_penalty": -5.0,
+            "bird_kill_penalty": -10.0,
+        },
+    },
+    "world": {
+        "chunk_size": 16,
+        "chunks_loaded": 2,
+        "plants_per_chunk": 20,
+        "day_cycle_length": 100,
+        "day_duration": 50,
+        "night_duration": 50,
+        "plant_cooldown": 25,
+        "interval_phases_max": 3,
+        "day_night_cycle_enabled": True,
+        "plant_types": ["day", "night", "interval", "random"],
+        "plant_type_probs": [0.35, 0.35, 0.2, 0.1],
+        "plant_types_enabled": {
+            "day": True,
+            "night": True,
+            "interval": True,
+            "random": True,
+        },
+    },
+    "predator": {
+        "enabled": True,
+        "speed": 0.025,
+        "detection_range": 0.3,
+        "chase_speed": 0.035,
+        "patrol_range": 2.0,
+    },
+    "network": {
+        "feature_size": 256,
+        "transformer_heads": 8,
+        "transformer_feedforward": 512,
+        "transformer_dropout": 0.1,
+        "transformer_layers": 3,
+    },
+    "rendering": {
+        "window_size": 600,
+        "play_seed": 123,
+    },
+}
 
-MAX_STEPS = 500
-FOOD_COUNT = 12
-HISTORY_LENGTH = 8
 
-NUM_ENVS = 16
-# Lowered from 128/256: halves per-update compute (dataset_size and
-# minibatch count scale directly with these). Also halves the rollout
-# batch PPO's advantage/return estimates are computed from -- still a
-# standard size, just smaller.
-ROLLOUT_LENGTH = 64
-PPO_EPOCHS = 4
-MINIBATCH_SIZE = 128
+class Config:
+    def __init__(self, d):
+        for k, v in d.items():
+            if isinstance(v, dict):
+                setattr(self, k, Config(v))
+            else:
+                setattr(self, k, v)
 
-GAMMA = 0.99
-GAE_LAMBDA = 0.95
-CLIP_EPSILON = 0.2
-LEARNING_RATE = 3e-4
-ENTROPY_COEF = 0.01
-VALUE_COEF = 0.5
+    def __repr__(self):
+        return f"Config({vars(self)})"
 
-MODEL_DIR = Path("models")
+    def to_dict(self):
+        d = {}
+        for k, v in vars(self).items():
+            if isinstance(v, Config):
+                d[k] = v.to_dict()
+            else:
+                d[k] = v
+        return d
 
-FOOD_TRACK_LIMIT = 10
-FOOD_DETECTION_RADIUS = 0.45
+    def set_from_args(self, args_dict):
+        for key, value in args_dict.items():
+            if value is None:
+                continue
+            parts = key.split(".")
+            obj = self
+            for part in parts[:-1]:
+                obj = getattr(obj, part)
+            setattr(obj, parts[-1], value)
 
-INITIAL_HUNGER = 1.0
-HUNGER_DEPLETION_PER_STEP = 0.002
-FOOD_HUNGER_RESTORE = 0.35
 
-SCALAR_INPUT_SIZE = 1 + FOOD_TRACK_LIMIT * 2
+def _deep_merge(base, override):
+    result = {}
+    for k in set(list(base.keys()) + list(override.keys())):
+        if k in base and k in override:
+            if isinstance(base[k], dict) and isinstance(override[k], dict):
+                result[k] = _deep_merge(base[k], override[k])
+            else:
+                result[k] = override[k]
+        elif k in override:
+            result[k] = override[k]
+        else:
+            result[k] = base[k]
+    return result
+
+
+def load_config(config_path=None):
+    toml_data = {}
+
+    if config_path is not None:
+        path = Path(config_path)
+        if path.exists():
+            with open(path, "rb") as f:
+                toml_data = tomllib.load(f)
+    else:
+        default_path = Path("butterfly.toml")
+        if default_path.exists():
+            with open(default_path, "rb") as f:
+                toml_data = tomllib.load(f)
+
+    merged = _deep_merge(_DEFAULTS, toml_data)
+    return Config(merged)
+
+
+cfg = None
 
 # ============================================================
 # Utility functions
@@ -169,13 +277,14 @@ def get_git_model_label():
 
 
 def create_model_filename():
-    MODEL_DIR.mkdir(parents=True, exist_ok=True)
+    model_dir = Path("models")
+    model_dir.mkdir(parents=True, exist_ok=True)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     git_label = get_git_model_label()
 
-    return MODEL_DIR / (f"{timestamp}_{git_label}_butterfly.pt")
+    return model_dir / (f"{timestamp}_{git_label}_butterfly.pt")
 
 
 def newest_model():
@@ -185,19 +294,302 @@ def newest_model():
     Raises FileNotFoundError if no model files exist.
     """
 
-    if not MODEL_DIR.exists():
-        raise FileNotFoundError(f"Model directory does not exist: {MODEL_DIR}")
+    model_dir = Path("models")
+
+    if not model_dir.exists():
+        raise FileNotFoundError(f"Model directory does not exist: {model_dir}")
 
     candidates = sorted(
-        MODEL_DIR.glob("*_butterfly.pt"),
+        model_dir.glob("*_butterfly.pt"),
         key=lambda path: path.stat().st_mtime,
         reverse=True,
     )
 
     if not candidates:
-        raise FileNotFoundError(f"No model files found in: {MODEL_DIR}")
+        raise FileNotFoundError(f"No model files found in: {model_dir}")
 
     return candidates[0]
+
+
+# ============================================================
+# Bird entity
+# ============================================================
+
+
+class BirdState:
+    ROAM = "roam"
+    CHASE = "chase"
+    RETURN = "return"
+
+
+class Bird:
+    def __init__(self, spawn_pos, rng):
+        self.pos = spawn_pos.copy().astype(np.float32)
+        self.spawn_pos = spawn_pos.copy().astype(np.float32)
+        self.state = BirdState.ROAM
+        self.rng = rng
+        self.target_pos = None
+
+    def update(self, butterfly_pos):
+        if self.state == BirdState.ROAM:
+            return self._do_roam(butterfly_pos)
+        elif self.state == BirdState.CHASE:
+            return self._do_chase(butterfly_pos)
+        elif self.state == BirdState.RETURN:
+            return self._do_return()
+        return None
+
+    def _do_roam(self, butterfly_pos):
+        if self.target_pos is None or self._reached_target():
+            angle = self.rng.uniform(0, 2 * math.pi)
+            dist = self.rng.uniform(0, cfg.predator.patrol_range)
+            self.target_pos = self.spawn_pos + np.array(
+                [dist * math.cos(angle), dist * math.sin(angle)], dtype=np.float32
+            )
+
+        direction = self.target_pos - self.pos
+        dist = float(np.linalg.norm(direction))
+
+        if dist > 0.1:
+            self.pos += (direction / dist) * cfg.predator.speed
+
+        dist_to_butterfly = float(np.linalg.norm(butterfly_pos - self.pos))
+        if dist_to_butterfly < cfg.predator.detection_range:
+            self.state = BirdState.CHASE
+
+        return None
+
+    def _do_chase(self, butterfly_pos):
+        direction = butterfly_pos - self.pos
+        dist = float(np.linalg.norm(direction))
+
+        if dist > 0.05:
+            self.pos += (direction / dist) * cfg.predator.chase_speed
+
+        if dist < 0.05:
+            self.state = BirdState.RETURN
+            return "kill"
+
+        if dist > cfg.predator.detection_range * 2:
+            self.state = BirdState.RETURN
+
+        return None
+
+    def _do_return(self):
+        direction = self.spawn_pos - self.pos
+        dist = float(np.linalg.norm(direction))
+
+        if dist > 0.5:
+            self.pos += (direction / dist) * cfg.predator.speed
+        else:
+            self.state = BirdState.ROAM
+            self.target_pos = None
+
+        return None
+
+    def _reached_target(self):
+        if self.target_pos is None:
+            return True
+        return float(np.linalg.norm(self.target_pos - self.pos)) < 0.5
+
+    def get_relative_info(self, butterfly_pos):
+        offset = self.pos - butterfly_pos
+        distance = float(np.linalg.norm(offset))
+        angle = math.atan2(float(offset[1]), float(offset[0])) / math.pi
+        normalized_dist = min(distance / (cfg.predator.detection_range * 2), 1.0)
+        return angle, normalized_dist, self.state
+
+
+# ============================================================
+# Chunk and world system
+# ============================================================
+
+
+class Chunk:
+    def __init__(self, chunk_x, chunk_y):
+        self.chunk_x = chunk_x
+        self.chunk_y = chunk_y
+        self.plants = self._generate_plants()
+
+    def _generate_plants(self):
+        plants = []
+        chunk_seed = hash((self.chunk_x, self.chunk_y)) % (2**31)
+        chunk_rng = np.random.default_rng(chunk_seed)
+
+        enabled = cfg.world.plant_types_enabled
+        enabled_dict = enabled.to_dict() if isinstance(enabled, Config) else enabled
+        enabled_types = [t for t in cfg.world.plant_types if enabled_dict.get(t, True)]
+        enabled_probs = [
+            p
+            for t, p in zip(cfg.world.plant_types, cfg.world.plant_type_probs)
+            if enabled_dict.get(t, True)
+        ]
+
+        if not enabled_types:
+            enabled_types = ["day"]
+            enabled_probs = [1.0]
+
+        total = sum(enabled_probs)
+        enabled_probs = [p / total for p in enabled_probs]
+
+        for _ in range(cfg.world.plants_per_chunk):
+            local_pos = chunk_rng.uniform(0, cfg.world.chunk_size, size=2).astype(
+                np.float32
+            )
+
+            plant_type = chunk_rng.choice(enabled_types, p=enabled_probs)
+
+            plant = {
+                "type": plant_type,
+                "local_pos": local_pos,
+                "active": True,
+                "cooldown_until": 0,
+            }
+
+            if plant_type == "interval":
+                num_phases = int(
+                    chunk_rng.integers(1, cfg.world.interval_phases_max + 1)
+                )
+                plant["phases"] = []
+                for _ in range(num_phases):
+                    start = int(chunk_rng.integers(0, cfg.world.day_cycle_length))
+                    duration = int(chunk_rng.integers(5, 20))
+                    plant["phases"].append((start, duration))
+            elif plant_type == "random":
+                plant["appear_prob"] = float(chunk_rng.uniform(0.01, 0.05))
+                plant["disappear_prob"] = float(chunk_rng.uniform(0.01, 0.05))
+                plant["active"] = bool(chunk_rng.random() < 0.5)
+
+            plants.append(plant)
+
+        return plants
+
+
+class WorldManager:
+    def __init__(self, rng):
+        self.rng = rng
+        self.loaded_chunks = {}
+        self.current_chunk = (0, 0)
+
+    def update(self, butterfly_world_pos):
+        chunk_x = int(math.floor(butterfly_world_pos[0] / cfg.world.chunk_size))
+        chunk_y = int(math.floor(butterfly_world_pos[1] / cfg.world.chunk_size))
+
+        self.current_chunk = (chunk_x, chunk_y)
+
+        needed_chunks = set()
+        half = cfg.world.chunks_loaded // 2
+        for dx in range(-half, half + 1):
+            for dy in range(-half, half + 1):
+                needed_chunks.add((chunk_x + dx, chunk_y + dy))
+
+        to_remove = [k for k in self.loaded_chunks if k not in needed_chunks]
+        for k in to_remove:
+            del self.loaded_chunks[k]
+
+        for chunk_pos in needed_chunks:
+            if chunk_pos not in self.loaded_chunks:
+                self.loaded_chunks[chunk_pos] = Chunk(chunk_pos[0], chunk_pos[1])
+
+    def get_all_plants(self, butterfly_world_pos):
+        all_plants = []
+
+        for chunk_pos, chunk in self.loaded_chunks.items():
+            chunk_origin_x = chunk_pos[0] * cfg.world.chunk_size
+            chunk_origin_y = chunk_pos[1] * cfg.world.chunk_size
+
+            for plant in chunk.plants:
+                world_pos = np.array(
+                    [
+                        chunk_origin_x + plant["local_pos"][0],
+                        chunk_origin_y + plant["local_pos"][1],
+                    ],
+                    dtype=np.float32,
+                )
+
+                all_plants.append(
+                    {
+                        "world_pos": world_pos,
+                        "type": plant["type"],
+                        "active": plant["active"],
+                        "plant_ref": plant,
+                    }
+                )
+
+        return all_plants
+
+    def get_visible_plants(self, butterfly_world_pos, current_step):
+        visible = []
+
+        for chunk_pos, chunk in self.loaded_chunks.items():
+            chunk_origin_x = chunk_pos[0] * cfg.world.chunk_size
+            chunk_origin_y = chunk_pos[1] * cfg.world.chunk_size
+
+            for plant in chunk.plants:
+                is_active = self._check_plant_active(plant, current_step)
+
+                if is_active:
+                    world_pos = np.array(
+                        [
+                            chunk_origin_x + plant["local_pos"][0],
+                            chunk_origin_y + plant["local_pos"][1],
+                        ],
+                        dtype=np.float32,
+                    )
+
+                    visible.append(
+                        {
+                            "world_pos": world_pos,
+                            "type": plant["type"],
+                            "plant_ref": plant,
+                        }
+                    )
+
+        return visible
+
+    def _check_plant_active(self, plant, current_step):
+        if current_step < plant["cooldown_until"]:
+            return False
+
+        if cfg.world.day_night_cycle_enabled:
+            step_in_cycle = current_step % cfg.world.day_cycle_length
+            is_daytime = step_in_cycle < cfg.world.day_duration
+        else:
+            is_daytime = True
+
+        if plant["type"] == "day":
+            return is_daytime
+        elif plant["type"] == "night":
+            return not is_daytime
+        elif plant["type"] == "interval":
+            if not cfg.world.day_night_cycle_enabled:
+                return True
+            step_in_cycle = current_step % cfg.world.day_cycle_length
+            return self._check_interval_active(plant, step_in_cycle)
+        elif plant["type"] == "random":
+            return self._check_random_active(plant, current_step)
+
+        return False
+
+    def _check_interval_active(self, plant, step_in_cycle):
+        for start, duration in plant.get("phases", []):
+            end = (start + duration) % cfg.world.day_cycle_length
+            if start < end:
+                if start <= step_in_cycle < end:
+                    return True
+            else:
+                if step_in_cycle >= start or step_in_cycle < end:
+                    return True
+        return False
+
+    def _check_random_active(self, plant, current_step):
+        if plant["active"]:
+            if self.rng.random() < plant.get("disappear_prob", 0.02):
+                plant["active"] = False
+        else:
+            if self.rng.random() < plant.get("appear_prob", 0.02):
+                plant["active"] = True
+        return plant["active"]
 
 
 # ============================================================
@@ -207,36 +599,27 @@ def newest_model():
 
 class ButterflyEnv:
     """
-    A simple 2D world.
+    An open-world 2D environment with procedural chunk generation.
 
-    The butterfly must search for flowers and collect nectar.
-    Observation: RGB image from the butterfly's point of view, PLUS a
-    scalar vector of hunger + angle/distance to nearby food.
-
-    NOTE (documented tradeoff, not a bug): the image and scalar
-    observations are largely redundant -- both encode the relative
-    position of nearby food, just in different formats. This is kept
-    intentionally (it can help the visual encoder learn useful
-    features, and mirrors how partial/full-precision sensors might
-    coexist in a real system) rather than "fixed", since collapsing
-    them into one modality would change the task itself. Worth
-    knowing if you're debugging why the two encoders learn similar
-    things.
+    The butterfly searches for flowers in a world with day-night cycles,
+    multiple plant types, and a bird predator. Observation: RGB image
+    showing only eatable plants, plus scalar vector with all nearby
+    plants, time info, and bird proximity.
     """
 
     def __init__(self, seed=None, render=False):
         self.rng = np.random.default_rng(seed)
         self.render_enabled = render
 
-        self.width = 1.0
-        self.height = 1.0
-
-        self.hunger = INITIAL_HUNGER
-
-        self.butterfly = np.zeros(2, dtype=np.float32)
-        self.food = []
+        self.hunger = cfg.environment.initial_hunger
+        self.butterfly_world_pos = np.zeros(2, dtype=np.float32)
         self.collected = 0
         self.steps = 0
+        self.time_step = 0
+        self.is_daytime = True
+
+        self.world = None
+        self.bird = None
 
         self.window = None
         self.clock = None
@@ -245,18 +628,27 @@ class ButterflyEnv:
         self.display_stats = {}
 
     def reset(self):
-        self.butterfly = self.rng.uniform(low=0.15, high=0.85, size=2).astype(
-            np.float32
-        )
-
-        self.food = [
-            self.rng.uniform(0.05, 0.95, size=2).astype(np.float32)
-            for _ in range(FOOD_COUNT)
-        ]
-
-        self.collected = 0
+        self.time_step = 0
+        self.is_daytime = True
         self.steps = 0
-        self.hunger = INITIAL_HUNGER
+        self.hunger = cfg.environment.initial_hunger
+        self.collected = 0
+
+        self.world = WorldManager(self.rng)
+
+        self.butterfly_world_pos = self.rng.uniform(
+            -cfg.world.chunk_size / 2, cfg.world.chunk_size / 2, size=2
+        ).astype(np.float32)
+
+        self.world.update(self.butterfly_world_pos)
+
+        if cfg.predator.enabled:
+            bird_spawn = self.rng.uniform(
+                -cfg.world.chunk_size, cfg.world.chunk_size, size=2
+            ).astype(np.float32)
+            self.bird = Bird(bird_spawn, self.rng)
+        else:
+            self.bird = None
 
         observation = self.render_observation()
         scalar_inputs = self.get_scalar_inputs()
@@ -265,58 +657,64 @@ class ButterflyEnv:
 
     def step(self, action):
         self.steps += 1
+        self.time_step += 1
+
+        if cfg.world.day_night_cycle_enabled:
+            self.is_daytime = (
+                self.time_step % cfg.world.day_cycle_length
+            ) < cfg.world.day_duration
+        else:
+            self.is_daytime = True
 
         action = np.asarray(action, dtype=np.float32)
         action = np.clip(action, -1.0, 1.0)
 
-        old_position = self.butterfly.copy()
+        old_position = self.butterfly_world_pos.copy()
 
-        speed = 0.035
-        self.butterfly += action * speed
-        self.butterfly = np.clip(self.butterfly, 0.02, 0.98)
+        self.butterfly_world_pos += action * cfg.environment.butterfly_speed
 
-        # Hunger continuously depletes.
-        self.hunger -= HUNGER_DEPLETION_PER_STEP
+        self.world.update(self.butterfly_world_pos)
+
+        visible_plants = self.world.get_visible_plants(
+            self.butterfly_world_pos, self.time_step
+        )
+
+        self.hunger -= cfg.environment.hunger_depletion_per_step
         self.hunger = max(0.0, self.hunger)
 
-        reward = -0.002
+        reward = cfg.environment.rewards.base_step
 
-        movement = np.linalg.norm(self.butterfly - old_position)
+        movement = np.linalg.norm(self.butterfly_world_pos - old_position)
+        reward += float(movement) * cfg.environment.rewards.movement_scale
 
-        reward += float(movement) * 0.02
-
-        remaining_food = []
-
-        for item in self.food:
-            distance = np.linalg.norm(self.butterfly - item)
-
-            if distance < 0.055:
-                reward += 2.0
-
-                # Eating restores hunger.
-                self.hunger += FOOD_HUNGER_RESTORE
+        for plant_info in visible_plants:
+            distance = np.linalg.norm(
+                self.butterfly_world_pos - plant_info["world_pos"]
+            )
+            if distance < cfg.environment.rewards.eating_distance:
+                reward += cfg.environment.rewards.eating_reward
+                self.hunger += cfg.environment.food_hunger_restore
                 self.hunger = min(1.0, self.hunger)
-
                 self.collected += 1
-            else:
-                remaining_food.append(item)
 
-        self.food = remaining_food
+                plant_ref = plant_info["plant_ref"]
+                plant_ref["active"] = False
+                plant_ref["cooldown_until"] = self.time_step + cfg.world.plant_cooldown
 
-        # End the episode when hunger reaches zero.
+        bird_killed = False
+        if cfg.predator.enabled and self.bird is not None:
+            bird_result = self.bird.update(self.butterfly_world_pos)
+            bird_killed = bird_result == "kill"
+
         hunger_dead = self.hunger <= 0.0
-
-        # Successfully collecting all food also ends the episode.
-        all_food_collected = len(self.food) == 0
-
-        terminated = hunger_dead or all_food_collected
-        truncated = self.steps >= MAX_STEPS
+        terminated = hunger_dead or bird_killed
+        truncated = self.steps >= cfg.environment.max_steps
 
         if hunger_dead:
-            reward -= 5.0
+            reward += cfg.environment.rewards.hunger_death_penalty
 
-        if all_food_collected:
-            reward += 5.0
+        if bird_killed:
+            reward += cfg.environment.rewards.bird_kill_penalty
 
         observation = self.render_observation()
         scalar_inputs = self.get_scalar_inputs()
@@ -332,103 +730,164 @@ class ButterflyEnv:
             truncated,
             {
                 "food_collected": self.collected,
-                "food_remaining": len(self.food),
                 "hunger": self.hunger,
-                "hunger_dead": hunger_dead,
+                "time_step": self.time_step,
+                "is_daytime": self.is_daytime,
+                "bird_state": self.bird.state if self.bird is not None else None,
+                "bird_killed": bird_killed,
             },
         )
 
     def get_scalar_inputs(self):
-        """
-        Returns:
-
-            hunger:
-                Normalized hunger value in [0, 1].
-
-            food_inputs:
-                Ten pairs of [angle, radius].
-
-                angle is normalized to [-1, 1].
-                radius is normalized to [0, 1].
-        """
-
         hunger = np.array([self.hunger], dtype=np.float32)
 
-        detectable_food = []
+        time_normalized = (
+            self.time_step % cfg.world.day_cycle_length
+        ) / cfg.world.day_cycle_length
+        time_input = np.array([time_normalized], dtype=np.float32)
+        is_day_input = np.array([1.0 if self.is_daytime else 0.0], dtype=np.float32)
 
-        for food_position in self.food:
-            offset = food_position - self.butterfly
+        bird_angle = 0.0
+        bird_dist = 1.0
+        bird_state_roam = 1.0
+        bird_state_chase = 0.0
+        bird_state_return = 0.0
+        bird_detected = 0.0
+
+        if self.bird is not None:
+            b_angle, b_dist, b_state = self.bird.get_relative_info(
+                self.butterfly_world_pos
+            )
+            bird_angle = b_angle
+            bird_dist = b_dist
+
+            if b_state == BirdState.ROAM:
+                bird_state_roam = 1.0
+            elif b_state == BirdState.CHASE:
+                bird_state_chase = 1.0
+            elif b_state == BirdState.RETURN:
+                bird_state_return = 1.0
+
+            bird_detected = 1.0 if b_dist < 1.0 else 0.0
+
+        bird_input = np.array(
+            [
+                bird_angle,
+                bird_dist,
+                bird_state_roam,
+                bird_state_chase,
+                bird_state_return,
+            ],
+            dtype=np.float32,
+        )
+        bird_detected_input = np.array([bird_detected], dtype=np.float32)
+
+        all_plants = self.world.get_all_plants(self.butterfly_world_pos)
+
+        detectable_food = []
+        for plant_info in all_plants:
+            offset = plant_info["world_pos"] - self.butterfly_world_pos
             distance = float(np.linalg.norm(offset))
 
-            if distance <= FOOD_DETECTION_RADIUS:
+            if distance <= cfg.environment.food_detection_radius:
                 angle = math.atan2(float(offset[1]), float(offset[0]))
-
-                # Normalize angle from [-pi, pi] to [-1, 1].
                 normalized_angle = angle / math.pi
+                normalized_radius = distance / cfg.environment.food_detection_radius
+                is_eatable = 1.0 if plant_info["active"] else 0.0
+                detectable_food.append(
+                    (distance, normalized_angle, normalized_radius, is_eatable)
+                )
 
-                # Normalize radius from [0, detection radius] to [0, 1].
-                normalized_radius = distance / FOOD_DETECTION_RADIUS
-
-                detectable_food.append((distance, normalized_angle, normalized_radius))
-
-        # Closest food first.
         detectable_food.sort(key=lambda item: item[0])
 
         food_inputs = []
-
-        for i in range(FOOD_TRACK_LIMIT):
+        for i in range(cfg.environment.food_track_limit):
             if i < len(detectable_food):
-                _, angle, radius = detectable_food[i]
-
-                food_inputs.extend([angle, radius])
+                _, angle, radius, is_eatable = detectable_food[i]
+                food_inputs.extend([angle, radius, is_eatable])
             else:
-                # No food in this slot.
-                food_inputs.extend([0.0, 1.0])
+                food_inputs.extend([0.0, 1.0, 0.0])
 
         food_inputs = np.asarray(food_inputs, dtype=np.float32)
 
-        return np.concatenate([hunger, food_inputs])
+        return np.concatenate(
+            [
+                hunger,
+                food_inputs,
+                time_input,
+                is_day_input,
+                bird_input,
+                bird_detected_input,
+            ]
+        )
 
     def render_observation(self):
-        """
-        Creates a top-down RGB image.
+        image_size = cfg.environment.image_size
+        image = np.zeros((3, image_size, image_size), dtype=np.float32)
 
-        The butterfly is in the center of the image.
-        Food is represented as colored points relative to it.
-        """
-        image = np.zeros((3, IMAGE_SIZE, IMAGE_SIZE), dtype=np.float32)
+        if self.is_daytime:
+            image[0, :, :] = 0.1
+            image[1, :, :] = 0.25
+            image[2, :, :] = 0.08
+        else:
+            image[0, :, :] = 0.02
+            image[1, :, :] = 0.05
+            image[2, :, :] = 0.12
 
-        # Dark green background.
-        image[0, :, :] = 0.04
-        image[1, :, :] = 0.12
-        image[2, :, :] = 0.05
+        visible_plants = self.world.get_visible_plants(
+            self.butterfly_world_pos, self.time_step
+        )
 
-        # Draw food.
-        for item in self.food:
-            relative = item - self.butterfly
+        for plant_info in visible_plants:
+            relative = plant_info["world_pos"] - self.butterfly_world_pos
+            pixel_x = int(image_size / 2 + relative[0] * image_size)
+            pixel_y = int(image_size / 2 + relative[1] * image_size)
 
-            # Local observation radius.
-            pixel_x = int(IMAGE_SIZE / 2 + relative[0] * IMAGE_SIZE)
-            pixel_y = int(IMAGE_SIZE / 2 + relative[1] * IMAGE_SIZE)
+            if 2 <= pixel_x < image_size - 2 and 2 <= pixel_y < image_size - 2:
+                color = self._get_plant_color(plant_info["type"])
+                image[0, pixel_y - 2 : pixel_y + 3, pixel_x - 2 : pixel_x + 3] = color[
+                    0
+                ]
+                image[1, pixel_y - 2 : pixel_y + 3, pixel_x - 2 : pixel_x + 3] = color[
+                    1
+                ]
+                image[2, pixel_y - 2 : pixel_y + 3, pixel_x - 2 : pixel_x + 3] = color[
+                    2
+                ]
 
-            if 2 <= pixel_x < IMAGE_SIZE - 2 and 2 <= pixel_y < IMAGE_SIZE - 2:
-                image[0, pixel_y - 2 : pixel_y + 3, pixel_x - 2 : pixel_x + 3] = 1.0
-                image[1, pixel_y - 2 : pixel_y + 3, pixel_x - 2 : pixel_x + 3] = 0.55
-                image[2, pixel_y - 2 : pixel_y + 3, pixel_x - 2 : pixel_x + 3] = 0.05
+        if self.bird is not None:
+            bird_relative = self.bird.pos - self.butterfly_world_pos
+            bird_px = int(image_size / 2 + bird_relative[0] * image_size)
+            bird_py = int(image_size / 2 + bird_relative[1] * image_size)
 
-        # Draw the butterfly at the center.
-        center = IMAGE_SIZE // 2
+            if 0 <= bird_px < image_size and 0 <= bird_py < image_size:
+                image[0, bird_py - 1 : bird_py + 2, bird_px - 1 : bird_px + 2] = 0.8
+                image[1, bird_py - 1 : bird_py + 2, bird_px - 1 : bird_px + 2] = 0.1
+                image[2, bird_py - 1 : bird_py + 2, bird_px - 1 : bird_px + 2] = 0.1
+
+        center = image_size // 2
         image[0, center - 2 : center + 3, center - 2 : center + 3] = 0.9
         image[1, center - 2 : center + 3, center - 2 : center + 3] = 0.2
         image[2, center - 2 : center + 3, center - 2 : center + 3] = 0.9
 
-        # Convert to HWC for pygame if necessary, but keep CHW for PyTorch.
         return image
 
+    def _get_plant_color(self, plant_type):
+        colors = {
+            "day": (1.0, 0.8, 0.1),
+            "night": (0.3, 0.1, 0.8),
+            "interval": (0.1, 0.8, 0.8),
+            "random": (0.8, 0.3, 0.8),
+        }
+        return colors.get(plant_type, (1.0, 1.0, 1.0))
+
     def render(self):
+        window_size = cfg.rendering.window_size
+        half = window_size // 2
+
         if self.window is None:
             pygame.init()
-            self.window = pygame.display.set_mode((600, 600))
+            self.window = pygame.display.set_mode((window_size, window_size))
             pygame.display.set_caption("Virtual Butterfly")
 
         if self.clock is None:
@@ -445,23 +904,40 @@ class ButterflyEnv:
                 if event.key == pygame.K_TAB:
                     self.show_full_stats = not self.show_full_stats
 
-        self.window.fill((20, 60, 25))
+        if self.is_daytime:
+            bg_color = (20, 80, 30)
+        else:
+            bg_color = (10, 20, 40)
 
-        # Food.
-        for item in self.food:
-            x = int(item[0] * 600)
-            y = int(item[1] * 600)
-            pygame.draw.circle(self.window, (255, 190, 30), (x, y), 7)
+        self.window.fill(bg_color)
 
-        # Butterfly.
-        bx = int(self.butterfly[0] * 600)
-        by = int(self.butterfly[1] * 600)
+        visible_plants = self.world.get_visible_plants(
+            self.butterfly_world_pos, self.time_step
+        )
 
+        for plant_info in visible_plants:
+            relative = plant_info["world_pos"] - self.butterfly_world_pos
+            screen_x = half + int(relative[0] * half)
+            screen_y = half + int(relative[1] * half)
+
+            if 0 <= screen_x < window_size and 0 <= screen_y < window_size:
+                color = self._get_plant_color_pygame(plant_info["type"])
+                pygame.draw.circle(self.window, color, (screen_x, screen_y), 7)
+
+        if self.bird is not None:
+            bird_relative = self.bird.pos - self.butterfly_world_pos
+            bird_x = half + int(bird_relative[0] * half)
+            bird_y = half + int(bird_relative[1] * half)
+
+            if 0 <= bird_x < window_size and 0 <= bird_y < window_size:
+                pygame.draw.circle(self.window, (200, 30, 30), (bird_x, bird_y), 10)
+
+        bx = half
+        by = half
         pygame.draw.circle(self.window, (240, 70, 220), (bx - 10, by), 10)
         pygame.draw.circle(self.window, (240, 70, 220), (bx + 10, by), 10)
         pygame.draw.circle(self.window, (30, 20, 30), (bx, by), 5)
 
-        # --- Stats overlay ---
         y_off = 10
 
         hunger_color = (
@@ -470,16 +946,21 @@ class ButterflyEnv:
             50,
         )
 
+        time_str = "Day" if self.is_daytime else "Night"
+        cycle_pos = self.time_step % cfg.world.day_cycle_length
         lines = [
             (f"Hunger: {self.hunger:.2f}", hunger_color),
+            (f"Food: {self.collected} collected", (220, 220, 220)),
             (
-                f"Food: {self.collected} collected, {len(self.food)} left",
-                (220, 220, 220),
+                f"Time: {time_str} ({cycle_pos}/{cfg.world.day_cycle_length})",
+                (200, 200, 150),
             ),
         ]
 
         if self.show_full_stats:
-            lines.append((f"Step: {self.steps}/{MAX_STEPS}", (180, 180, 180)))
+            lines.append(
+                (f"Step: {self.steps}/{cfg.environment.max_steps}", (180, 180, 180))
+            )
             lines.append(
                 (
                     f"Reward: {self.display_stats.get('cumulative_reward', 0.0):.2f}",
@@ -494,14 +975,14 @@ class ButterflyEnv:
                 lines.append(
                     (f"Action: [{action[0]:+.3f}, {action[1]:+.3f}]", (180, 180, 180))
                 )
+            bird_state_str = self.bird.state if self.bird else "N/A"
+            lines.append((f"Bird: {bird_state_str}", (200, 100, 100)))
             lines.append(("TAB: hide full stats", (100, 100, 100)))
         else:
             lines.append(("TAB: full stats", (100, 100, 100)))
 
-        # Hunger bar background.
         bar_x, bar_y, bar_w, bar_h = 10, y_off + len(lines) * 20 + 4, 120, 8
         pygame.draw.rect(self.window, (40, 40, 40), (bar_x, bar_y, bar_w, bar_h))
-        # Hunger bar fill.
         fill_w = int(bar_w * clamp(self.hunger, 0.0, 1.0))
         pygame.draw.rect(self.window, hunger_color, (bar_x, bar_y, fill_w, bar_h))
 
@@ -513,6 +994,15 @@ class ButterflyEnv:
         pygame.display.flip()
         self.clock.tick(60)
 
+    def _get_plant_color_pygame(self, plant_type):
+        colors = {
+            "day": (255, 200, 30),
+            "night": (80, 30, 200),
+            "interval": (30, 200, 200),
+            "random": (200, 80, 200),
+        }
+        return colors.get(plant_type, (255, 255, 255))
+
 
 # ============================================================
 # Multiprocessing environment workers
@@ -523,7 +1013,10 @@ class ButterflyEnv:
 # ============================================================
 
 
-def _env_worker(remote, seed):
+def _env_worker(remote, seed, config_dict):
+    global cfg
+    cfg = Config(config_dict)
+
     env = ButterflyEnv(seed=seed, render=False)
 
     try:
@@ -571,17 +1064,19 @@ class SubprocVecEnv:
     guarded by the __main__ check at the bottom of this file.
     """
 
-    def __init__(self, seeds):
+    def __init__(self, seeds, config):
         self.num_envs = len(seeds)
 
         self.remotes, worker_remotes = zip(*[mp.Pipe() for _ in seeds])
 
         self.processes = []
 
+        config_dict = config.to_dict()
+
         for worker_remote, seed in zip(worker_remotes, seeds):
             process = mp.Process(
                 target=_env_worker,
-                args=(worker_remote, seed),
+                args=(worker_remote, seed, config_dict),
                 daemon=True,
             )
             process.start()
@@ -708,15 +1203,22 @@ def encode_images_deduped(visual_encoder, images):
 
 
 class ButterflyPolicy(nn.Module):
-    def __init__(self, feature_size=256, action_size=2, history_length=HISTORY_LENGTH):
+    def __init__(self, feature_size=None, action_size=2, history_length=None):
         super().__init__()
+
+        if feature_size is None:
+            feature_size = cfg.network.feature_size
+        if history_length is None:
+            history_length = cfg.environment.history_length
 
         self.history_length = history_length
 
         self.visual_encoder = SmallResNet(feature_size)
 
+        scalar_input_size = 1 + cfg.environment.food_track_limit * 3 + 1 + 1 + 5 + 1
+
         self.scalar_encoder = nn.Sequential(
-            nn.Linear(SCALAR_INPUT_SIZE, 128),
+            nn.Linear(scalar_input_size, 128),
             nn.ReLU(),
             nn.Linear(128, feature_size),
             nn.ReLU(),
@@ -738,14 +1240,16 @@ class ButterflyPolicy(nn.Module):
 
         transformer_layer = nn.TransformerEncoderLayer(
             d_model=feature_size,
-            nhead=8,
-            dim_feedforward=512,
-            dropout=0.1,
+            nhead=cfg.network.transformer_heads,
+            dim_feedforward=cfg.network.transformer_feedforward,
+            dropout=cfg.network.transformer_dropout,
             batch_first=True,
             activation="gelu",
         )
 
-        self.transformer = nn.TransformerEncoder(transformer_layer, num_layers=3)
+        self.transformer = nn.TransformerEncoder(
+            transformer_layer, num_layers=cfg.network.transformer_layers
+        )
 
         self.policy_head = nn.Sequential(
             nn.Linear(feature_size, 128),
@@ -858,7 +1362,9 @@ class ButterflyPolicy(nn.Module):
 
 
 class HistoryBuffer:
-    def __init__(self, length=HISTORY_LENGTH):
+    def __init__(self, length=None):
+        if length is None:
+            length = cfg.environment.history_length
         self.length = length
         self.image_buffer = deque(maxlen=length)
         self.scalar_buffer = deque(maxlen=length)
@@ -928,9 +1434,17 @@ def compute_gae(rewards, values, dones):
             next_value = values[t + 1]
             next_nonterminal = 1.0 - dones[t]
 
-        delta = rewards[t] + GAMMA * next_value * next_nonterminal - values[t]
+        delta = (
+            rewards[t] + cfg.training.gamma * next_value * next_nonterminal - values[t]
+        )
 
-        last_advantage = delta + GAMMA * GAE_LAMBDA * next_nonterminal * last_advantage
+        last_advantage = (
+            delta
+            + cfg.training.gamma
+            * cfg.training.gae_lambda
+            * next_nonterminal
+            * last_advantage
+        )
 
         advantages[t] = last_advantage
 
@@ -948,7 +1462,7 @@ def train(total_updates=1000, output_model=None):
     print(f"Training on device: {DEVICE}")
     print(f"Model will be saved to: {output_model}")
 
-    vec_env = SubprocVecEnv(seeds=list(range(NUM_ENVS)))
+    vec_env = SubprocVecEnv(seeds=list(range(cfg.training.num_envs)), config=cfg)
 
     observations, scalars = vec_env.reset()
 
@@ -961,7 +1475,9 @@ def train(total_updates=1000, output_model=None):
         histories.append(history)
 
     policy = ButterflyPolicy().to(DEVICE)
-    optimizer = optim.Adam(policy.parameters(), lr=LEARNING_RATE)
+    optimizer = optim.Adam(policy.parameters(), lr=cfg.training.learning_rate)
+
+    scalar_input_size = 1 + cfg.environment.food_track_limit * 3 + 1 + 1 + 5 + 1
 
     try:
         for update in range(total_updates):
@@ -975,10 +1491,10 @@ def train(total_updates=1000, output_model=None):
 
             rollout_start_time = time.time()
 
-            for step in range(ROLLOUT_LENGTH):
+            for step in range(cfg.training.rollout_length):
                 print_progress_bar(
                     step + 1,
-                    ROLLOUT_LENGTH,
+                    cfg.training.rollout_length,
                     prefix=f"Update {update:05d}/{total_updates} rollout ",
                     start_time=rollout_start_time,
                 )
@@ -1035,7 +1551,7 @@ def train(total_updates=1000, output_model=None):
                                 terminal_scalars.unsqueeze(0).to(DEVICE),
                             )
 
-                        reward = reward + GAMMA * bootstrap_value.item()
+                        reward = reward + cfg.training.gamma * bootstrap_value.item()
 
                     step_rewards.append(reward)
                     step_dones.append(float(done))
@@ -1065,14 +1581,22 @@ def train(total_updates=1000, output_model=None):
             dones = torch.stack(rollout_dones)
 
             images = images.reshape(
-                ROLLOUT_LENGTH * NUM_ENVS, HISTORY_LENGTH, 3, IMAGE_SIZE, IMAGE_SIZE
+                cfg.training.rollout_length * cfg.training.num_envs,
+                cfg.environment.history_length,
+                3,
+                cfg.environment.image_size,
+                cfg.environment.image_size,
             )
 
             scalars_tensor = scalars_tensor.reshape(
-                ROLLOUT_LENGTH * NUM_ENVS, HISTORY_LENGTH, SCALAR_INPUT_SIZE
+                cfg.training.rollout_length * cfg.training.num_envs,
+                cfg.environment.history_length,
+                scalar_input_size,
             )
 
-            actions = actions.reshape(ROLLOUT_LENGTH * NUM_ENVS, 2)
+            actions = actions.reshape(
+                cfg.training.rollout_length * cfg.training.num_envs, 2
+            )
 
             old_log_probs = old_log_probs.reshape(-1)
             rewards_np = rewards.numpy()
@@ -1082,7 +1606,7 @@ def train(total_updates=1000, output_model=None):
             advantages = []
             returns = []
 
-            for env_index in range(NUM_ENVS):
+            for env_index in range(cfg.training.num_envs):
                 env_rewards = rewards_np[:, env_index]
                 env_values = values_np[:, env_index]
                 env_dones = dones_np[:, env_index]
@@ -1103,18 +1627,20 @@ def train(total_updates=1000, output_model=None):
 
             advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
-            dataset_size = ROLLOUT_LENGTH * NUM_ENVS
+            dataset_size = cfg.training.rollout_length * cfg.training.num_envs
             indices = np.arange(dataset_size)
 
-            minibatches_per_epoch = math.ceil(dataset_size / MINIBATCH_SIZE)
-            total_minibatches = PPO_EPOCHS * minibatches_per_epoch
+            minibatches_per_epoch = math.ceil(
+                dataset_size / cfg.training.minibatch_size
+            )
+            total_minibatches = cfg.training.ppo_epochs * minibatches_per_epoch
             minibatch_counter = 0
             backprop_start_time = time.time()
 
-            for _ in range(PPO_EPOCHS):
+            for _ in range(cfg.training.ppo_epochs):
                 np.random.shuffle(indices)
 
-                for start in range(0, dataset_size, MINIBATCH_SIZE):
+                for start in range(0, dataset_size, cfg.training.minibatch_size):
                     minibatch_counter += 1
 
                     print_progress_bar(
@@ -1124,7 +1650,7 @@ def train(total_updates=1000, output_model=None):
                         start_time=backprop_start_time,
                     )
 
-                    batch_indices = indices[start : start + MINIBATCH_SIZE]
+                    batch_indices = indices[start : start + cfg.training.minibatch_size]
 
                     batch_images = images[batch_indices].to(DEVICE)
                     batch_scalars = scalars_tensor[batch_indices].to(DEVICE)
@@ -1141,7 +1667,10 @@ def train(total_updates=1000, output_model=None):
 
                     unclipped = ratio * batch_advantages
                     clipped = (
-                        ratio.clamp(1.0 - CLIP_EPSILON, 1.0 + CLIP_EPSILON)
+                        ratio.clamp(
+                            1.0 - cfg.training.clip_epsilon,
+                            1.0 + cfg.training.clip_epsilon,
+                        )
                         * batch_advantages
                     )
 
@@ -1153,20 +1682,22 @@ def train(total_updates=1000, output_model=None):
 
                     loss = (
                         policy_loss
-                        + VALUE_COEF * value_loss
-                        + ENTROPY_COEF * entropy_loss
+                        + cfg.training.value_coef * value_loss
+                        + cfg.training.entropy_coef * entropy_loss
                     )
 
                     optimizer.zero_grad()
                     loss.backward()
 
-                    torch.nn.utils.clip_grad_norm_(policy.parameters(), max_norm=0.5)
+                    torch.nn.utils.clip_grad_norm_(
+                        policy.parameters(), max_norm=cfg.training.gradient_max_norm
+                    )
 
                     optimizer.step()
 
             print()  # move past the in-place backprop progress bar
 
-            if update % 5 == 0:
+            if update % cfg.training.log_interval == 0:
                 average_reward = rewards.mean().item()
                 average_value = values.mean().item()
                 average_advantage = advantages.mean().item()
@@ -1179,7 +1710,7 @@ def train(total_updates=1000, output_model=None):
                     f"loss={loss.item(): .4f}",
                 )
 
-            if update % 10 == 0:
+            if update % cfg.training.checkpoint_interval == 0:
                 torch.save(policy.state_dict(), output_model)
                 print(f"Checkpoint saved: {output_model}")
 
@@ -1215,7 +1746,7 @@ def play(weights=None):
 
     print(f"Loading model: {weights}")
 
-    env = ButterflyEnv(seed=123, render=True)
+    env = ButterflyEnv(seed=cfg.rendering.play_seed, render=True)
     policy = ButterflyPolicy().to(DEVICE)
 
     policy.load_state_dict(torch.load(weights, map_location=DEVICE))
@@ -1261,17 +1792,163 @@ def play(weights=None):
                 print(
                     "Episode finished | "
                     f"food collected={info['food_collected']} | "
-                    f"food remaining={info['food_remaining']} | "
+                    f"hunger={info['hunger']:.2f} | "
+                    f"time_step={info['time_step']} | "
+                    f"bird_state={info['bird_state']} | "
                     f"total reward={cumulative_reward:.2f}"
                 )
 
 
 # ============================================================
-# Main
+# CLI argument parser
 # ============================================================
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
+
+def _str_to_bool(v):
+    if isinstance(v, bool):
+        return v
+    if v.lower() in ("true", "1", "yes"):
+        return True
+    if v.lower() in ("false", "0", "no"):
+        return False
+    raise argparse.ArgumentTypeError(f"Boolean value expected, got {v!r}")
+
+
+# Mapping of argparse dest -> dot-path into the config. Kept as a
+# module-level so both build_parser (to create the args) and main
+# (to apply overrides) can share it. argparse mangles dots/hyphens
+# into underscores in the dest, so we use explicit dest names.
+_CONFIG_ARG_DESTS = {
+    "training": {
+        "training_rollout_length": "training.rollout_length",
+        "training_ppo_epochs": "training.ppo_epochs",
+        "training_minibatch_size": "training.minibatch_size",
+        "training_gamma": "training.gamma",
+        "training_gae_lambda": "training.gae_lambda",
+        "training_clip_epsilon": "training.clip_epsilon",
+        "training_learning_rate": "training.learning_rate",
+        "training_entropy_coef": "training.entropy_coef",
+        "training_value_coef": "training.value_coef",
+        "training_num_envs": "training.num_envs",
+        "training_gradient_max_norm": "training.gradient_max_norm",
+        "training_checkpoint_interval": "training.checkpoint_interval",
+        "training_log_interval": "training.log_interval",
+    },
+    "environment": {
+        "environment_image_size": "environment.image_size",
+        "environment_max_steps": "environment.max_steps",
+        "environment_history_length": "environment.history_length",
+        "environment_food_track_limit": "environment.food_track_limit",
+        "environment_food_detection_radius": "environment.food_detection_radius",
+        "environment_initial_hunger": "environment.initial_hunger",
+        "environment_hunger_depletion_per_step": "environment.hunger_depletion_per_step",
+        "environment_food_hunger_restore": "environment.food_hunger_restore",
+        "environment_butterfly_speed": "environment.butterfly_speed",
+    },
+    "environment.rewards": {
+        "environment_rewards_base_step": "environment.rewards.base_step",
+        "environment_rewards_movement_scale": "environment.rewards.movement_scale",
+        "environment_rewards_eating_distance": "environment.rewards.eating_distance",
+        "environment_rewards_eating_reward": "environment.rewards.eating_reward",
+        "environment_rewards_hunger_death_penalty": "environment.rewards.hunger_death_penalty",
+        "environment_rewards_bird_kill_penalty": "environment.rewards.bird_kill_penalty",
+    },
+    "world": {
+        "world_chunk_size": "world.chunk_size",
+        "world_chunks_loaded": "world.chunks_loaded",
+        "world_plants_per_chunk": "world.plants_per_chunk",
+        "world_day_cycle_length": "world.day_cycle_length",
+        "world_day_duration": "world.day_duration",
+        "world_night_duration": "world.night_duration",
+        "world_plant_cooldown": "world.plant_cooldown",
+        "world_interval_phases_max": "world.interval_phases_max",
+        "world_day_night_cycle_enabled": "world.day_night_cycle_enabled",
+    },
+    "predator": {
+        "predator_enabled": "predator.enabled",
+        "predator_speed": "predator.speed",
+        "predator_detection_range": "predator.detection_range",
+        "predator_chase_speed": "predator.chase_speed",
+        "predator_patrol_range": "predator.patrol_range",
+    },
+    "network": {
+        "network_feature_size": "network.feature_size",
+        "network_transformer_heads": "network.transformer_heads",
+        "network_transformer_feedforward": "network.transformer_feedforward",
+        "network_transformer_dropout": "network.transformer_dropout",
+        "network_transformer_layers": "network.transformer_layers",
+    },
+    "rendering": {
+        "rendering_window_size": "rendering.window_size",
+        "rendering_play_seed": "rendering.play_seed",
+    },
+}
+
+# Dest -> (type, name) for the CLI args, in case we want richer types.
+_CONFIG_ARG_TYPES = {
+    "training_rollout_length": int,
+    "training_ppo_epochs": int,
+    "training_minibatch_size": int,
+    "training_gamma": float,
+    "training_gae_lambda": float,
+    "training_clip_epsilon": float,
+    "training_learning_rate": float,
+    "training_entropy_coef": float,
+    "training_value_coef": float,
+    "training_num_envs": int,
+    "training_gradient_max_norm": float,
+    "training_checkpoint_interval": int,
+    "training_log_interval": int,
+    "environment_image_size": int,
+    "environment_max_steps": int,
+    "environment_history_length": int,
+    "environment_food_track_limit": int,
+    "environment_food_detection_radius": float,
+    "environment_initial_hunger": float,
+    "environment_hunger_depletion_per_step": float,
+    "environment_food_hunger_restore": float,
+    "environment_butterfly_speed": float,
+    "environment_rewards_base_step": float,
+    "environment_rewards_movement_scale": float,
+    "environment_rewards_eating_distance": float,
+    "environment_rewards_eating_reward": float,
+    "environment_rewards_hunger_death_penalty": float,
+    "environment_rewards_bird_kill_penalty": float,
+    "world_chunk_size": int,
+    "world_chunks_loaded": int,
+    "world_plants_per_chunk": int,
+    "world_day_cycle_length": int,
+    "world_day_duration": int,
+    "world_night_duration": int,
+    "world_plant_cooldown": int,
+    "world_interval_phases_max": int,
+    "world_day_night_cycle_enabled": _str_to_bool,
+    "predator_enabled": _str_to_bool,
+    "predator_speed": float,
+    "predator_detection_range": float,
+    "predator_chase_speed": float,
+    "predator_patrol_range": float,
+    "network_feature_size": int,
+    "network_transformer_heads": int,
+    "network_transformer_feedforward": int,
+    "network_transformer_dropout": float,
+    "network_transformer_layers": int,
+    "rendering_window_size": int,
+    "rendering_play_seed": int,
+}
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(
+        description="Virtual Butterfly RL agent",
+    )
+
+    parser.add_argument(
+        "--config",
+        type=str,
+        default=None,
+        help="Path to TOML config file (default: butterfly.toml)",
+    )
 
     parser.add_argument("--mode", choices=["train", "run", "play"], default="train")
 
@@ -1301,12 +1978,73 @@ if __name__ == "__main__":
         ),
     )
 
+    group_names = {
+        "training": "training",
+        "environment": "environment",
+        "environment.rewards": "environment.rewards",
+        "world": "world",
+        "predator": "predator",
+        "network": "network",
+        "rendering": "rendering",
+    }
+
+    for group_name in group_names:
+        group = parser.add_argument_group(group_name)
+        for dest in _CONFIG_ARG_DESTS[group_name]:
+            arg_type = _CONFIG_ARG_TYPES[dest]
+            group.add_argument(
+                f"--{dest.replace('_', '-')}", type=arg_type, default=None
+            )
+
+    world = parser.add_argument_group("world")
+    world.add_argument(
+        "--world.enabled-plant-types",
+        dest="world_enabled_plant_types",
+        type=str,
+        default=None,
+        help="Comma-separated list of enabled plant types (e.g. 'day,night,interval'). Overrides plant_types_enabled.",
+    )
+
+    return parser
+
+
+# ============================================================
+# Main
+# ============================================================
+
+if __name__ == "__main__":
+    parser = build_parser()
     args = parser.parse_args()
+
+    cfg = load_config(args.config)
+
+    # Build the dest -> config-path reverse lookup
+    dest_to_config = {}
+    for mapping in _CONFIG_ARG_DESTS.values():
+        dest_to_config.update(mapping)
+
+    cli_overrides = {}
+    for dest, value in vars(args).items():
+        if value is None or dest not in dest_to_config:
+            continue
+        cli_overrides[dest_to_config[dest]] = value
+
+    # Handle --world.enabled-plant-types: convert comma-separated list to dict
+    enabled_plant_types_str = getattr(args, "world_enabled_plant_types", None)
+    if enabled_plant_types_str is not None:
+        enabled = [t.strip() for t in enabled_plant_types_str.split(",")]
+        all_types = cfg.world.plant_types
+        cfg.world.plant_types_enabled = {t: (t in enabled) for t in all_types}
+
+    cfg.set_from_args(cli_overrides)
+
+    # Recalculate SCALAR_INPUT_SIZE for convenience
+    SCALAR_INPUT_SIZE = 1 + cfg.environment.food_track_limit * 3 + 1 + 1 + 5 + 1
 
     seed_everything(args.seed)
 
     if DEVICE == "cpu":
-        thread_count = args.threads if args.threads is not None else os.cpu_count()
+        thread_count = args.threads if args.threads is not None else os.cpu_count() or 1
         torch.set_num_threads(thread_count)
         print(f"CPU device: using {thread_count} torch threads.")
 
