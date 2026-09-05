@@ -1,26 +1,26 @@
 [training]
-rollout_length      = 256
+rollout_length      = 512
 ppo_epochs          = 4
 minibatch_size      = 256
 gamma               = 0.99
 gae_lambda          = 0.95
 clip_epsilon        = 0.2
 learning_rate       = 3e-4
-entropy_coef        = 0.01
+entropy_coef        = 0.1
 value_coef          = 0.5
-num_envs            = 4
+num_envs            = 2
 gradient_max_norm   = 0.5
 checkpoint_interval = 5
 log_interval        = 5
 
 [environment]
-image_size                = 128
+image_size                = 64
 max_steps                 = 100000
 history_length            = 8
 food_track_limit          = 15
 food_detection_radius     = 1.0
 initial_hunger            = 1.0
-hunger_depletion_per_step = 0.002
+hunger_depletion_per_step = 0.0002
 food_hunger_restore       = 0.35
 butterfly_speed           = 0.035
 
