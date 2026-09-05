@@ -1,0 +1,711 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Policy Attribution Viewer</title>
+<style>
+  :root {
+    --bg: #12151a;
+    --panel: #1a1f27;
+    --panel-border: #262c37;
+    --text: #e7e5df;
+    --text-dim: #8a92a3;
+    --accent: #e2793d;
+    --accent-dim: #6b4128;
+    --accent2: #6e9bc7;
+    --accent2-dim: #2c3b4a;
+    --grid: #262c37;
+    --neg: #c1554a;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, "Segoe UI", Inter, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .mono { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+
+  header {
+    padding: 28px 28px 18px;
+    border-bottom: 1px solid var(--panel-border);
+  }
+  header h1 {
+    margin: 0 0 4px;
+    font-size: 22px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+  }
+  header p {
+    margin: 0;
+    color: var(--text-dim);
+    font-size: 13.5px;
+    max-width: 640px;
+    line-height: 1.5;
+  }
+
+  .load-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-top: 16px;
+    flex-wrap: wrap;
+  }
+  .file-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    color: var(--text);
+    padding: 8px 14px;
+    border-radius: 6px;
+    font-size: 13px;
+    cursor: pointer;
+  }
+  .file-btn:hover { border-color: var(--accent); }
+  #fileInput { display: none; }
+  #fileStatus { color: var(--text-dim); font-size: 13px; }
+
+  #emptyState {
+    padding: 80px 28px;
+    text-align: center;
+    color: var(--text-dim);
+    max-width: 480px;
+    margin: 0 auto;
+  }
+  #emptyState .icon { font-size: 40px; margin-bottom: 12px; opacity: 0.6; }
+
+  #app { display: none; padding: 22px 28px 48px; }
+
+  .scrubber {
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-radius: 10px;
+    padding: 16px 20px;
+    margin-bottom: 18px;
+    display: flex;
+    align-items: center;
+    gap: 18px;
+  }
+  .scrubber .step-label {
+    font-size: 13px;
+    color: var(--text-dim);
+    white-space: nowrap;
+    min-width: 90px;
+  }
+  .scrubber .step-label b { color: var(--text); font-weight: 600; }
+  input[type="range"] {
+    flex: 1;
+    -webkit-appearance: none;
+    height: 4px;
+    border-radius: 2px;
+    background: var(--grid);
+    outline: none;
+  }
+  input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 14px; height: 14px;
+    border-radius: 50%;
+    background: var(--accent);
+    cursor: pointer;
+    border: 2px solid var(--bg);
+  }
+  .play-btn {
+    background: var(--accent-dim);
+    color: var(--accent);
+    border: 1px solid var(--accent);
+    border-radius: 6px;
+    width: 34px; height: 34px;
+    cursor: pointer;
+    font-size: 13px;
+    display: flex; align-items: center; justify-content: center;
+  }
+
+  .objective-toggle {
+    display: inline-flex;
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-radius: 8px;
+    padding: 3px;
+    margin-bottom: 18px;
+  }
+  .objective-toggle button {
+    background: transparent;
+    border: none;
+    color: var(--text-dim);
+    padding: 7px 16px;
+    border-radius: 6px;
+    font-size: 13px;
+    cursor: pointer;
+  }
+  .objective-toggle button.active {
+    background: var(--accent-dim);
+    color: var(--accent);
+  }
+
+  .grid {
+    display: grid;
+    grid-template-columns: 1.3fr 1fr;
+    gap: 16px;
+  }
+  @media (max-width: 900px) {
+    .grid { grid-template-columns: 1fr; }
+  }
+
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-radius: 10px;
+    padding: 18px 20px;
+  }
+  .panel h2 {
+    margin: 0 0 4px;
+    font-size: 14px;
+    font-weight: 600;
+  }
+  .panel .sub {
+    margin: 0 0 14px;
+    font-size: 12px;
+    color: var(--text-dim);
+  }
+
+  .frames-row {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .frame-cell {
+    position: relative;
+    cursor: pointer;
+    border-radius: 6px;
+    overflow: hidden;
+    border: 2px solid transparent;
+    width: 68px; height: 68px;
+    flex-shrink: 0;
+  }
+  .frame-cell.selected { border-color: var(--accent); }
+  .frame-cell img, .frame-cell canvas {
+    position: absolute; top: 0; left: 0;
+    width: 100%; height: 100%;
+    image-rendering: pixelated;
+  }
+  .frame-cell .t-label {
+    position: absolute; bottom: 2px; right: 4px;
+    font-size: 9px; color: rgba(255,255,255,0.75);
+    text-shadow: 0 1px 2px rgba(0,0,0,0.8);
+  }
+  .overlay-toggle {
+    margin-top: 12px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12.5px;
+    color: var(--text-dim);
+  }
+  .overlay-toggle input { accent-color: var(--accent); }
+
+  .focused-frame {
+    margin-top: 14px;
+    display: flex;
+    gap: 16px;
+    align-items: flex-start;
+  }
+  .focused-frame .big {
+    position: relative;
+    width: 220px; height: 220px;
+    border-radius: 8px;
+    overflow: hidden;
+    border: 1px solid var(--panel-border);
+    flex-shrink: 0;
+  }
+  .focused-frame .big img, .focused-frame .big canvas {
+    position: absolute; top: 0; left: 0;
+    width: 100%; height: 100%;
+    image-rendering: pixelated;
+  }
+  .focused-frame .meta { font-size: 12.5px; color: var(--text-dim); line-height: 1.7; }
+  .focused-frame .meta b { color: var(--text); }
+
+  .bar-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 6px;
+  }
+  .bar-label {
+    width: 110px;
+    font-size: 11.5px;
+    color: var(--text-dim);
+    text-align: right;
+    flex-shrink: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .bar-track {
+    flex: 1;
+    height: 12px;
+    background: var(--grid);
+    border-radius: 3px;
+    overflow: hidden;
+  }
+  .bar-fill {
+    height: 100%;
+    background: var(--accent2);
+    border-radius: 3px;
+  }
+  .bar-val {
+    width: 44px;
+    font-size: 11px;
+    color: var(--text-dim);
+    flex-shrink: 0;
+  }
+  .show-all-link {
+    display: block;
+    margin-top: 8px;
+    font-size: 12px;
+    color: var(--accent2);
+    cursor: pointer;
+    background: none; border: none; padding: 0;
+  }
+
+  .attn-controls {
+    display: flex;
+    gap: 16px;
+    margin-bottom: 12px;
+    font-size: 12px;
+    color: var(--text-dim);
+  }
+  .attn-controls select {
+    background: var(--bg);
+    color: var(--text);
+    border: 1px solid var(--panel-border);
+    border-radius: 5px;
+    padding: 4px 8px;
+    font-size: 12px;
+  }
+  #attnCanvas { border-radius: 6px; }
+  .attn-note { font-size: 11.5px; color: var(--text-dim); margin-top: 10px; line-height: 1.5; }
+
+  .fusion-bars { margin-top: 4px; }
+  .fusion-row { margin-bottom: 14px; }
+  .fusion-row .lbl { display: flex; justify-content: space-between; font-size: 12.5px; margin-bottom: 6px; }
+  .fusion-row .lbl .pct { color: var(--text-dim); }
+  .fusion-track { height: 18px; border-radius: 4px; overflow: hidden; display: flex; background: var(--grid); }
+  .fusion-vision { background: var(--accent); height: 100%; }
+  .fusion-scalar { background: var(--accent2); height: 100%; }
+
+  .output-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 12px;
+    margin-top: 6px;
+  }
+  .output-cell {
+    background: var(--bg);
+    border: 1px solid var(--panel-border);
+    border-radius: 8px;
+    padding: 12px;
+  }
+  .output-cell .k { font-size: 11px; color: var(--text-dim); margin-bottom: 4px; }
+  .output-cell .v { font-size: 17px; font-weight: 600; }
+  .output-cell .v.pos { color: #7fbf7f; }
+  .output-cell .v.neg { color: var(--neg); }
+
+  #valueChart { width: 100%; height: 60px; display: block; margin-top: 10px; }
+
+  ::selection { background: var(--accent-dim); }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Policy Attribution Viewer</h1>
+  <p>Explore what drove the butterfly policy's action and value estimate at each step of a recorded episode: per-pixel image saliency, scalar feature gradients, transformer attention over the 8-frame history, and the vision/scalar fusion balance.</p>
+  <div class="load-row">
+    <label class="file-btn" for="fileInput">Load attribution.json</label>
+    <input type="file" id="fileInput" accept="application/json" />
+    <span id="fileStatus">No file loaded</span>
+  </div>
+</header>
+
+<div id="emptyState">
+  <div class="icon">◐</div>
+  <div>Run <span class="mono">export_attribution.py</span> against one of your checkpoints, then load the resulting JSON file above.</div>
+</div>
+
+<div id="app">
+
+  <div class="scrubber">
+    <button class="play-btn" id="playBtn">▶</button>
+    <div class="step-label">step <b id="stepNum">0</b> / <span id="stepMax">0</span></div>
+    <input type="range" id="stepSlider" min="0" max="0" value="0" step="1" />
+  </div>
+
+  <div class="objective-toggle">
+    <button id="objAction" class="active">Action influence</button>
+    <button id="objValue">Value influence</button>
+  </div>
+
+  <div class="grid">
+
+    <div class="panel">
+      <h2>History frames &amp; saliency</h2>
+      <p class="sub">What the vision branch is looking at, per timestep. Brighter = higher gradient magnitude for the selected objective.</p>
+      <div class="frames-row" id="framesRow"></div>
+      <div class="overlay-toggle">
+        <input type="checkbox" id="overlayToggle" checked />
+        <label for="overlayToggle">Show saliency overlay</label>
+      </div>
+      <div class="focused-frame">
+        <div class="big" id="bigFrame"></div>
+        <div class="meta" id="focusedMeta"></div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>Scalar feature attribution</h2>
+      <p class="sub">Gradient magnitude of the objective w.r.t. each scalar input, at the focused timestep.</p>
+      <div id="scalarBars"></div>
+      <button class="show-all-link" id="showAllScalars">Show all features</button>
+    </div>
+
+    <div class="panel">
+      <h2>Transformer attention</h2>
+      <p class="sub">Which of the 8 history timesteps the current decision attends to.</p>
+      <div class="attn-controls">
+        <label>Layer <select id="layerSelect"></select></label>
+        <label>Head <select id="headSelect"></select></label>
+      </div>
+      <canvas id="attnCanvas" width="280" height="280"></canvas>
+      <div class="attn-note">Rows = query timestep, columns = key timestep. Only the last row (current step) feeds the policy/value heads &mdash; the causal mask blocks attention to future timesteps.</div>
+    </div>
+
+    <div class="panel">
+      <h2>Vision vs. scalar fusion balance</h2>
+      <p class="sub">Relative gradient norm flowing through each branch just before fusion &mdash; a proxy for which modality is currently driving the decision.</p>
+      <div class="fusion-bars" id="fusionBars"></div>
+    </div>
+
+  </div>
+
+  <div class="panel" style="margin-top:16px;">
+    <h2>Output</h2>
+    <div class="output-grid" id="outputGrid"></div>
+    <canvas id="valueChart"></canvas>
+  </div>
+
+</div>
+
+<script>
+let data = null;
+let state = { step: 0, focusedT: null, objective: 'action', layer: 0, head: 0, showAllScalars: false, overlay: true, playing: false, playTimer: null };
+
+const fileInput = document.getElementById('fileInput');
+const fileStatus = document.getElementById('fileStatus');
+const emptyState = document.getElementById('emptyState');
+const app = document.getElementById('app');
+
+fileInput.addEventListener('change', (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  fileStatus.textContent = 'Loading ' + file.name + '...';
+  const reader = new FileReader();
+  reader.onload = (ev) => {
+    try {
+      data = JSON.parse(ev.target.result);
+      state.step = 0;
+      state.focusedT = data.history_length - 1;
+      fileStatus.textContent = file.name + ' — ' + data.frames.length + ' steps';
+      emptyState.style.display = 'none';
+      app.style.display = 'block';
+      initControls();
+      renderAll();
+    } catch (err) {
+      fileStatus.textContent = 'Could not parse file: ' + err.message;
+    }
+  };
+  reader.readAsText(file);
+});
+
+function initControls() {
+  const slider = document.getElementById('stepSlider');
+  slider.max = data.frames.length - 1;
+  slider.value = 0;
+  document.getElementById('stepMax').textContent = data.frames.length - 1;
+  slider.oninput = () => { state.step = parseInt(slider.value); renderAll(); };
+
+  document.getElementById('objAction').onclick = () => setObjective('action');
+  document.getElementById('objValue').onclick = () => setObjective('value');
+
+  document.getElementById('overlayToggle').onchange = (e) => { state.overlay = e.target.checked; renderAll(); };
+
+  document.getElementById('showAllScalars').onclick = () => {
+    state.showAllScalars = !state.showAllScalars;
+    document.getElementById('showAllScalars').textContent = state.showAllScalars ? 'Show top features only' : 'Show all features';
+    renderScalarBars();
+  };
+
+  const layerSelect = document.getElementById('layerSelect');
+  layerSelect.innerHTML = '';
+  for (let i = 0; i < data.num_transformer_layers; i++) {
+    const opt = document.createElement('option');
+    opt.value = i; opt.textContent = i;
+    layerSelect.appendChild(opt);
+  }
+  layerSelect.onchange = () => { state.layer = parseInt(layerSelect.value); renderAttention(); };
+
+  const headSelect = document.getElementById('headSelect');
+  headSelect.innerHTML = '';
+  for (let i = 0; i < data.num_transformer_heads; i++) {
+    const opt = document.createElement('option');
+    opt.value = i; opt.textContent = i;
+    headSelect.appendChild(opt);
+  }
+  headSelect.onchange = () => { state.head = parseInt(headSelect.value); renderAttention(); };
+
+  document.getElementById('playBtn').onclick = togglePlay;
+}
+
+function setObjective(obj) {
+  state.objective = obj;
+  document.getElementById('objAction').classList.toggle('active', obj === 'action');
+  document.getElementById('objValue').classList.toggle('active', obj === 'value');
+  renderAll();
+}
+
+function togglePlay() {
+  state.playing = !state.playing;
+  const btn = document.getElementById('playBtn');
+  btn.textContent = state.playing ? '⏸' : '▶';
+  if (state.playing) {
+    state.playTimer = setInterval(() => {
+      state.step = (state.step + 1) % data.frames.length;
+      document.getElementById('stepSlider').value = state.step;
+      renderAll();
+    }, 450);
+  } else {
+    clearInterval(state.playTimer);
+  }
+}
+
+function currentFrame() { return data.frames[state.step]; }
+
+function renderAll() {
+  document.getElementById('stepNum').textContent = state.step;
+  renderFrames();
+  renderScalarBars();
+  renderAttention();
+  renderFusion();
+  renderOutputs();
+}
+
+// --- Frames + saliency ---
+
+function renderFrames() {
+  const frame = currentFrame();
+  const row = document.getElementById('framesRow');
+  row.innerHTML = '';
+  const hist = data.history_length;
+
+  for (let t = 0; t < hist; t++) {
+    const cell = document.createElement('div');
+    cell.className = 'frame-cell' + (t === state.focusedT ? ' selected' : '');
+    cell.onclick = () => { state.focusedT = t; renderFrames(); renderBigFrame(); };
+
+    const img = document.createElement('img');
+    img.src = frame.raw_frames[t] || '';
+    cell.appendChild(img);
+
+    if (state.overlay) {
+      const canvas = document.createElement('canvas');
+      canvas.width = 68; canvas.height = 68;
+      cell.appendChild(canvas);
+      drawSaliencyOverlay(canvas, frame.attribution[state.objective].image[t]);
+    }
+
+    const label = document.createElement('div');
+    label.className = 't-label';
+    label.textContent = 't-' + (hist - 1 - t);
+    cell.appendChild(label);
+
+    row.appendChild(cell);
+  }
+  renderBigFrame();
+}
+
+function drawSaliencyOverlay(canvas, grid) {
+  const ctx = canvas.getContext('2d');
+  const n = grid.length;
+  const cw = canvas.width / n, ch = canvas.height / n;
+  for (let y = 0; y < n; y++) {
+    for (let x = 0; x < n; x++) {
+      const v = grid[y][x];
+      ctx.fillStyle = `rgba(226, 121, 61, ${(v * 0.75).toFixed(3)})`;
+      ctx.fillRect(x * cw, y * ch, cw + 0.5, ch + 0.5);
+    }
+  }
+}
+
+function renderBigFrame() {
+  const frame = currentFrame();
+  const t = state.focusedT ?? data.history_length - 1;
+  const big = document.getElementById('bigFrame');
+  big.innerHTML = '';
+  const img = document.createElement('img');
+  img.src = frame.raw_frames[t] || '';
+  big.appendChild(img);
+  if (state.overlay) {
+    const canvas = document.createElement('canvas');
+    canvas.width = 220; canvas.height = 220;
+    big.appendChild(canvas);
+    drawSaliencyOverlay(canvas, frame.attribution[state.objective].image[t]);
+  }
+
+  const meta = document.getElementById('focusedMeta');
+  const hist = data.history_length;
+  meta.innerHTML =
+    `<div>timestep <b>t-${hist - 1 - t}</b> of history window</div>` +
+    `<div>objective: <b>${state.objective}</b></div>` +
+    `<div>image branch grad norm: <b>${frame.attribution[state.objective].image_branch_norm.toFixed(3)}</b></div>`;
+}
+
+// --- Scalar bars ---
+
+function renderScalarBars() {
+  const frame = currentFrame();
+  const t = state.focusedT ?? data.history_length - 1;
+  const values = frame.attribution[state.objective].scalar[t];
+  const labels = data.scalar_labels;
+
+  let items = labels.map((label, i) => ({ label, val: Math.abs(values[i]) }));
+  items.sort((a, b) => b.val - a.val);
+  const maxVal = items.length ? items[0].val : 1;
+
+  if (!state.showAllScalars) items = items.slice(0, 12);
+
+  const container = document.getElementById('scalarBars');
+  container.innerHTML = '';
+  items.forEach((item) => {
+    const row = document.createElement('div');
+    row.className = 'bar-row';
+    const pct = maxVal > 0 ? (item.val / maxVal) * 100 : 0;
+    row.innerHTML =
+      `<div class="bar-label mono">${item.label}</div>` +
+      `<div class="bar-track"><div class="bar-fill" style="width:${pct}%"></div></div>` +
+      `<div class="bar-val mono">${item.val.toFixed(3)}</div>`;
+    container.appendChild(row);
+  });
+}
+
+// --- Attention heatmap ---
+
+function renderAttention() {
+  const frame = currentFrame();
+  const canvas = document.getElementById('attnCanvas');
+  const ctx = canvas.getContext('2d');
+  const matrix = frame.attention[state.layer][state.head];
+  const n = matrix.length;
+  const size = canvas.width;
+  const cell = size / n;
+
+  ctx.fillStyle = '#12151a';
+  ctx.fillRect(0, 0, size, size);
+
+  for (let row = 0; row < n; row++) {
+    for (let col = 0; col < n; col++) {
+      const v = matrix[row][col];
+      ctx.fillStyle = `rgba(110, 155, 199, ${Math.min(v * 2.2, 1).toFixed(3)})`;
+      ctx.fillRect(col * cell, row * cell, cell - 1, cell - 1);
+    }
+  }
+
+  ctx.strokeStyle = '#e2793d';
+  ctx.lineWidth = 2;
+  ctx.strokeRect((n - 1) * cell, 0, cell, size);
+}
+
+// --- Fusion balance ---
+
+function renderFusion() {
+  const frame = currentFrame();
+  const attr = frame.attribution[state.objective];
+  const total = attr.image_branch_norm + attr.scalar_branch_norm;
+  const visionPct = total > 0 ? (attr.image_branch_norm / total) * 100 : 50;
+  const scalarPct = 100 - visionPct;
+
+  const container = document.getElementById('fusionBars');
+  container.innerHTML =
+    `<div class="fusion-row">
+       <div class="lbl"><span>Vision (ResNet) branch</span><span class="pct mono">${visionPct.toFixed(1)}%</span></div>
+       <div class="fusion-track"><div class="fusion-vision" style="width:${visionPct}%"></div></div>
+     </div>
+     <div class="fusion-row">
+       <div class="lbl"><span>Scalar branch</span><span class="pct mono">${scalarPct.toFixed(1)}%</span></div>
+       <div class="fusion-track"><div class="fusion-scalar" style="width:${scalarPct}%"></div></div>
+     </div>`;
+}
+
+// --- Output panel ---
+
+function renderOutputs() {
+  const frame = currentFrame();
+  const grid = document.getElementById('outputGrid');
+  const fmt = (v) => (v >= 0 ? '+' : '') + v.toFixed(3);
+
+  grid.innerHTML = `
+    <div class="output-cell">
+      <div class="k">action (dx, dy)</div>
+      <div class="v mono">${fmt(frame.action_taken[0])}, ${fmt(frame.action_taken[1])}</div>
+    </div>
+    <div class="output-cell">
+      <div class="k">action mean (pre-tanh)</div>
+      <div class="v mono">${fmt(frame.action_mean[0])}, ${fmt(frame.action_mean[1])}</div>
+    </div>
+    <div class="output-cell">
+      <div class="k">value estimate</div>
+      <div class="v mono ${frame.value >= 0 ? 'pos' : 'neg'}">${fmt(frame.value)}</div>
+    </div>`;
+
+  drawValueChart();
+}
+
+function drawValueChart() {
+  const canvas = document.getElementById('valueChart');
+  const ctx = canvas.getContext('2d');
+  const dpr = window.devicePixelRatio || 1;
+  const w = canvas.clientWidth, h = 60;
+  canvas.width = w * dpr; canvas.height = h * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+
+  const values = data.frames.map((f) => f.value);
+  const min = Math.min(...values), max = Math.max(...values);
+  const range = (max - min) || 1;
+
+  ctx.strokeStyle = '#6e9bc7';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  values.forEach((v, i) => {
+    const x = (i / (values.length - 1 || 1)) * (w - 8) + 4;
+    const y = h - 6 - ((v - min) / range) * (h - 12);
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+
+  const cx = (state.step / (values.length - 1 || 1)) * (w - 8) + 4;
+  const cy = h - 6 - ((values[state.step] - min) / range) * (h - 12);
+  ctx.fillStyle = '#e2793d';
+  ctx.beginPath();
+  ctx.arc(cx, cy, 3.5, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+window.addEventListener('resize', () => { if (data) drawValueChart(); });
+</script>
+
+</body>
+</html>
