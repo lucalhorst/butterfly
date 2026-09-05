@@ -1,30 +1,30 @@
-[build-system]
-requires = ["setuptools>=68"]
-build-backend = "setuptools.build_meta"
-
 [project]
-name = "butterfly"
-version = "0.1.0"
-description = "Reinforcement learning (PPO) project training a virtual butterfly to forage for flowers in a procedural 2D world."
-readme = "README.md"
+name            = "butterfly"
+version         = "0.1.0"
+description     = "Reinforcement learning (PPO) project training a virtual butterfly to forage for flowers in a procedural 2D world."
+readme          = "README.md"
 requires-python = ">=3.10"
-dependencies = [
-    "torch>=2.0",
-    "torchvision>=0.15",
-    "numpy>=1.24",
-    "pygame-ce>=2.5",
-    "pydantic>=2.0",
-    "pillow>=10.0",
+dependencies    = [
+  "numpy>=2.0",
+  "pillow>=10.0",
+  "pydantic>=2.0",
+  "pygame-ce>=2.5",
+  "torch>=2.0",
+  "torchvision>=0.15",
 ]
 
 [project.scripts]
-butterfly-train = "apps.train:main"
-butterfly-play = "apps.human_player:main"
-butterfly-ai = "apps.ai_player:main"
+butterfly-ai     = "apps.ai_player:main"
 butterfly-attrib = "apps.attribution_viewer:main"
+butterfly-play   = "apps.human_player:main"
+butterfly-train  = "apps.train:main"
 
-[tool.setuptools.packages.find]
-include = ["butterfly*", "apps*"]
+[build-system]
+requires      = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 py-modules = []
+
+[tool.setuptools.packages.find]
+include = ["butterfly*", "apps*"]
