@@ -11,7 +11,7 @@ from butterfly.config import Config
 from butterfly.env.vec_env import SubprocVecEnv
 from butterfly.model.history import HistoryBuffer
 from butterfly.model.policy import ButterflyPolicy
-from butterfly.utils import create_model_filename, print_progress_bar
+from butterfly.utils import DEVICE, create_model_filename, print_progress_bar
 from pathlib import Path
 
 __all__ = ["compute_gae", "train"]

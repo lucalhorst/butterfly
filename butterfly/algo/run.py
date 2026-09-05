@@ -73,7 +73,7 @@ def run_ai_episodes(
         done = False
         cumulative_reward = 0.0
 
-        while not done and env.render_enabled:
+        while not done:
             with torch.no_grad():
                 image_sequence, scalar_sequence = history.tensors()
 
@@ -103,6 +103,11 @@ def run_ai_episodes(
 
             if render:
                 clock.tick(speed)
+
+            if not env.render_enabled:
+                # User closed the window (or rendering was disabled mid-run);
+                # stop early.
+                done = True
 
         yield {
             "episode": episode,
