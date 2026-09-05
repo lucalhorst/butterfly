@@ -34,7 +34,7 @@ bird_kill_penalty    = -10.0
 
 [world]
 chunk_size              = 16
-chunks_loaded           = 2
+chunks_loaded           = 4
 plants_per_chunk        = 20
 day_cycle_length        = 100
 day_duration            = 50
