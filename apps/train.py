@@ -42,6 +42,13 @@ def build_parser():
     parser.add_argument("--seed", type=int, default=42)
 
     parser.add_argument(
+        "--csv-output",
+        type=str,
+        default=None,
+        help="Path for the per-update metrics CSV (default: alongside the checkpoint).",
+    )
+
+    parser.add_argument(
         "--threads",
         type=int,
         default=None,
@@ -71,7 +78,13 @@ def main():
         print(f"CPU device: using {thread_count} torch threads.")
 
     try:
-        train(cfg, total_updates=args.updates, resume_from=args.resume)
+        train(
+            cfg,
+            total_updates=args.updates,
+            resume_from=args.resume,
+            csv_output=args.csv_output,
+            tb_logdir=cfg.training.tensorboard_logdir,
+        )
     except KeyboardInterrupt:
         pass
 

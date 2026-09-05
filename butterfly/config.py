@@ -40,6 +40,9 @@ class TrainingConfig(BaseModel):
     gradient_max_norm: float = 0.5
     checkpoint_interval: int = 5
     log_interval: int = 5
+    log_csv: bool = True
+    log_tensorboard: bool = True
+    tensorboard_logdir: Optional[str] = None
 
 
 class RewardsConfig(BaseModel):
@@ -180,6 +183,9 @@ CONFIG_ARG_DESTS = {
         "training_gradient_max_norm": "training.gradient_max_norm",
         "training_checkpoint_interval": "training.checkpoint_interval",
         "training_log_interval": "training.log_interval",
+        "training_log_csv": "training.log_csv",
+        "training_log_tensorboard": "training.log_tensorboard",
+        "training_tensorboard_logdir": "training.tensorboard_logdir",
     },
     "environment": {
         "environment_image_size": "environment.image_size",
@@ -246,6 +252,9 @@ CONFIG_ARG_TYPES = {
     "training_gradient_max_norm": float,
     "training_checkpoint_interval": int,
     "training_log_interval": int,
+    "training_log_csv": _str_to_bool,
+    "training_log_tensorboard": _str_to_bool,
+    "training_tensorboard_logdir": str,
     "environment_image_size": int,
     "environment_max_steps": int,
     "environment_history_length": int,

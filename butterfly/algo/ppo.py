@@ -2,17 +2,25 @@
 
 import math
 import time
+from datetime import datetime
+from pathlib import Path
 
 import numpy as np
 import torch
 import torch.optim as optim
+from torch.utils.tensorboard import SummaryWriter
 
 from butterfly.config import Config
 from butterfly.env.vec_env import SubprocVecEnv
+from butterfly.metrics import (
+    METRIC_TAGS,
+    CsvMetricLogger,
+    create_metrics_csv_path,
+    create_tensorboard_logdir,
+)
 from butterfly.model.history import HistoryBuffer
 from butterfly.model.policy import ButterflyPolicy
 from butterfly.utils import DEVICE, create_model_filename, print_progress_bar
-from pathlib import Path
 
 __all__ = ["compute_gae", "train"]
 
@@ -56,6 +64,8 @@ def train(
     output_model=None,
     resume_from=None,
     device=DEVICE,
+    csv_output=None,
+    tb_logdir=None,
 ):
     if output_model is None:
         output_model = create_model_filename()
@@ -68,6 +78,40 @@ def train(
 
     print(f"Training on device: {device}")
     print(f"Model will be saved to: {output_model}")
+
+    config_summary = {
+        "device": device,
+        "learning_rate": training.learning_rate,
+        "gamma": training.gamma,
+        "gae_lambda": training.gae_lambda,
+        "clip_epsilon": training.clip_epsilon,
+        "entropy_coef": training.entropy_coef,
+        "value_coef": training.value_coef,
+        "rollout_length": training.rollout_length,
+        "num_envs": training.num_envs,
+        "ppo_epochs": training.ppo_epochs,
+        "minibatch_size": training.minibatch_size,
+        "resume_from": resume_from,
+    }
+
+    csv_logger = None
+    tb_writer = None
+
+    if training.log_csv:
+        csv_path = (
+            Path(csv_output) if csv_output is not None else create_metrics_csv_path(output_model)
+        )
+        csv_logger = CsvMetricLogger(csv_path).open()
+        print(f"Metrics CSV: {csv_path}")
+
+    if training.log_tensorboard:
+        tb_dir = Path(tb_logdir) if tb_logdir is not None else create_tensorboard_logdir()
+        tb_writer = SummaryWriter(log_dir=str(tb_dir))
+        tb_writer.add_text(
+            "config",
+            "\n".join(f"{key}={value}" for key, value in config_summary.items()),
+        )
+        print(f"TensorBoard run: {tb_dir}")
 
     vec_env = SubprocVecEnv(seeds=list(range(training.num_envs)), config=config)
 
@@ -126,6 +170,9 @@ def train(
             rollout_dones = []
 
             rollout_start_time = time.time()
+
+            episode_return_accum = [0.0] * training.num_envs
+            episode_returns = []
 
             for step in range(training.rollout_length):
                 print_progress_bar(
@@ -192,7 +239,11 @@ def train(
                     step_rewards.append(reward)
                     step_dones.append(float(done))
 
+                    episode_return_accum[i] += reward
+
                     if done:
+                        episode_returns.append(episode_return_accum[i])
+                        episode_return_accum[i] = 0.0
                         histories[i].reset(next_observation, next_scalars)
                     else:
                         histories[i].append(next_observation, next_scalars)
@@ -279,6 +330,10 @@ def train(
             value_losses = []
             entropy_losses = []
             total_losses = []
+            kl_divs = []
+            clip_fractions = []
+            ratio_means = []
+            grad_norms = []
 
             for _ in range(training.ppo_epochs):
                 np.random.shuffle(indices)
@@ -332,7 +387,7 @@ def train(
                     optimizer.zero_grad()
                     loss.backward()
 
-                    torch.nn.utils.clip_grad_norm_(
+                    grad_norm = torch.nn.utils.clip_grad_norm_(
                         policy.parameters(), max_norm=training.gradient_max_norm
                     )
 
@@ -342,30 +397,115 @@ def train(
                     value_losses.append(value_loss.item())
                     entropy_losses.append(entropy_loss.item())
                     total_losses.append(loss.item())
+                    kl_divs.append(
+                        (new_log_probs - batch_old_log_probs).mean().item()
+                    )
+                    clip_fractions.append(
+                        ((ratio - 1.0).abs() > training.clip_epsilon)
+                        .float()
+                        .mean()
+                        .item()
+                    )
+                    ratio_means.append(ratio.mean().item())
+                    grad_norms.append(grad_norm.item())
 
             print()  # move past the in-place backprop progress bar
 
+            rollout_time = time.time() - rollout_start_time
+            backprop_time = time.time() - backprop_start_time
+
+            reward_values = rewards.flatten()
+            return_values = returns.flatten()
+            value_values = values.flatten()
+            advantage_values = advantages.flatten()
+            action_magnitudes = actions.norm(dim=-1)
+
+            avg_total_loss = float(np.mean(total_losses))
+            avg_policy_loss = float(np.mean(policy_losses))
+            avg_value_loss = float(np.mean(value_losses))
+            avg_entropy_loss = float(np.mean(entropy_losses))
+
+            metrics = {
+                "update": update,
+                "timestamp": datetime.now().isoformat(timespec="seconds"),
+                "rollout_time_s": rollout_time,
+                "backprop_time_s": backprop_time,
+                "update_time_s": rollout_time + backprop_time,
+                "rollout_steps_s": (
+                    training.rollout_length * training.num_envs / rollout_time
+                ),
+                "reward_mean": reward_values.mean().item(),
+                "reward_std": reward_values.std().item(),
+                "reward_min": reward_values.min().item(),
+                "reward_max": reward_values.max().item(),
+                "return_mean": return_values.mean().item(),
+                "return_std": return_values.std().item(),
+                "return_min": return_values.min().item(),
+                "return_max": return_values.max().item(),
+                "episode_count": int(dones.sum().item()),
+                "episode_return_mean": (
+                    float(np.mean(episode_returns)) if episode_returns else float("nan")
+                ),
+                "value_mean": value_values.mean().item(),
+                "value_std": value_values.std().item(),
+                "value_min": value_values.min().item(),
+                "value_max": value_values.max().item(),
+                "advantage_mean": advantage_values.mean().item(),
+                "advantage_std": advantage_values.std().item(),
+                "advantage_min": advantage_values.min().item(),
+                "advantage_max": advantage_values.max().item(),
+                "loss_total": avg_total_loss,
+                "loss_policy": avg_policy_loss,
+                "loss_value": avg_value_loss,
+                "loss_entropy": avg_entropy_loss,
+                "entropy": -avg_entropy_loss,
+                "log_prob_mean": old_log_probs.mean().item(),
+                "kl_approx": float(np.mean(kl_divs)),
+                "clip_fraction": float(np.mean(clip_fractions)),
+                "ratio_mean": float(np.mean(ratio_means)),
+                "grad_norm": float(np.mean(grad_norms)),
+                "action_sat": (actions.abs() > 0.99).float().mean().item(),
+                "action_mag_mean": action_magnitudes.mean().item(),
+                "action_mag_max": action_magnitudes.max().item(),
+                "action_mean_x": actions[:, 0].mean().item(),
+                "action_mean_y": actions[:, 1].mean().item(),
+            }
+
+            if csv_logger is not None:
+                csv_logger.log(metrics)
+
+            if tb_writer is not None:
+                for tag in METRIC_TAGS:
+                    value = metrics[tag]
+                    if isinstance(value, (int, float)):
+                        tb_writer.add_scalar(tag, value, global_step=update)
+
+                tb_writer.add_histogram(
+                    "rollout/reward", reward_values.numpy(), global_step=update
+                )
+                tb_writer.add_histogram(
+                    "rollout/advantage", advantage_values.numpy(), global_step=update
+                )
+                tb_writer.add_histogram(
+                    "rollout/value", value_values.numpy(), global_step=update
+                )
+                tb_writer.add_histogram(
+                    "rollout/action_magnitude",
+                    action_magnitudes.numpy(),
+                    global_step=update,
+                )
+
             if update % training.log_interval == 0:
-                average_reward = rewards.mean().item()
-                average_value = values.mean().item()
-                average_advantage = advantages.mean().item()
-
-                avg_total_loss = float(np.mean(total_losses))
-                avg_policy_loss = float(np.mean(policy_losses))
-                avg_value_loss = float(np.mean(value_losses))
-                avg_entropy_loss = float(np.mean(entropy_losses))
-
-                action_saturation = (actions.abs() > 0.99).float().mean().item()
-
                 print(
                     f"Update {update:05d}/{total_updates} | "
-                    f"reward={average_reward: .4f} | "
-                    f"value={average_value: .4f} | "
-                    f"advantage={average_advantage: .4f} | "
-                    f"loss={avg_total_loss: .4f} "
-                    f"(policy={avg_policy_loss: .4f}, value={avg_value_loss: .4f}, "
-                    f"entropy={avg_entropy_loss: .4f}) | "
-                    f"action_sat={action_saturation:.1%}",
+                    f"reward={metrics['reward_mean']: .4f} | "
+                    f"value={metrics['value_mean']: .4f} | "
+                    f"advantage={metrics['advantage_mean']: .4f} | "
+                    f"loss={metrics['loss_total']: .4f} "
+                    f"(policy={metrics['loss_policy']: .4f}, "
+                    f"value={metrics['loss_value']: .4f}, "
+                    f"entropy={metrics['loss_entropy']: .4f}) | "
+                    f"action_sat={metrics['action_sat']:.1%}",
                 )
 
             if update % training.checkpoint_interval == 0:
@@ -397,4 +537,8 @@ def train(
         print(f"Saved model: {output_model}")
         raise
     finally:
+        if csv_logger is not None:
+            csv_logger.close()
+        if tb_writer is not None:
+            tb_writer.close()
         vec_env.close()
