@@ -27,8 +27,8 @@ butterfly_speed           = 0.035
 [environment.rewards]
 base_step            = -0.002
 movement_scale       = 0.02
-eating_distance      = 0.055
-eating_reward        = 2.0
+eating_distance      = 0.55
+eating_reward        = 6.0
 hunger_death_penalty = -5.0
 bird_kill_penalty    = -10.0
 
