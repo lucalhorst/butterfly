@@ -1115,55 +1115,38 @@ class SubprocVecEnv:
 # ============================================================
 
 
-class ResidualBlock(nn.Module):
-    def __init__(self, channels):
-        super().__init__()
-
-        self.block = nn.Sequential(
-            nn.Conv2d(channels, channels, 3, padding=1),
-            nn.ReLU(),
-            nn.Conv2d(channels, channels, 3, padding=1),
-        )
-
-        self.activation = nn.ReLU()
-
-    def forward(self, x):
-        return self.activation(x + self.block(x))
-
-
-class SmallResNet(nn.Module):
+class ResNetEncoder(nn.Module):
     """
-    Channel widths halved from the original (32/64/128 -> 16/32/64).
-    Conv2d compute scales with in_channels * out_channels, so this cuts
-    convolution FLOPs roughly 4x -- the dominant cost in this whole
-    model on CPU, independent of env count or rollout/minibatch size.
+    Standard torchvision ResNet-18 backbone, trained from scratch (no
+    ImageNet-pretrained weights -- the environment's frames are flat
+    synthetic color blocks, not natural photos, so pretrained features
+    are unlikely to transfer, and pretrained weights assume 224x224
+    input/ImageNet normalization that this 64x64 pipeline doesn't use).
+
+    The final fully-connected classification layer is replaced with a
+    plain linear projection to `feature_size` so the output matches
+    what ButterflyPolicy and encode_images_deduped expect: [N, 3, H, W]
+    in, [N, feature_size] out.
+
+    Heads-up: resnet18 is far heavier (~11M params, full 4-stage
+    BasicBlock design) than the previous hand-rolled SmallResNet, which
+    was deliberately shrunk for CPU speed since this network runs once
+    per env per rollout step (num_envs of them) and again every PPO
+    minibatch. Expect noticeably slower training on CPU.
     """
 
     def __init__(self, feature_size=256):
         super().__init__()
 
-        self.encoder = nn.Sequential(
-            nn.Conv2d(3, 16, 5, stride=2, padding=2),
-            nn.ReLU(),
-            ResidualBlock(16),
-            nn.Conv2d(16, 32, 3, stride=2, padding=1),
-            nn.ReLU(),
-            ResidualBlock(32),
-            nn.Conv2d(32, 64, 3, stride=2, padding=1),
-            nn.ReLU(),
-            ResidualBlock(64),
-            nn.AdaptiveAvgPool2d((1, 1)),
-        )
+        from torchvision.models import resnet18
 
-        self.projection = nn.Sequential(
-            nn.Flatten(),
-            nn.Linear(64, feature_size),
-            nn.ReLU(),
-        )
+        self.backbone = resnet18(weights=None)
+
+        in_features = self.backbone.fc.in_features
+        self.backbone.fc = nn.Linear(in_features, feature_size)
 
     def forward(self, x):
-        x = self.encoder(x)
-        return self.projection(x)
+        return self.backbone(x)
 
 
 def encode_images_deduped(visual_encoder, images):
@@ -1213,7 +1196,7 @@ class ButterflyPolicy(nn.Module):
 
         self.history_length = history_length
 
-        self.visual_encoder = SmallResNet(feature_size)
+        self.visual_encoder = ResNetEncoder(feature_size)
 
         scalar_input_size = 1 + cfg.environment.food_track_limit * 3 + 1 + 1 + 5 + 1
 
