@@ -14,8 +14,8 @@ checkpoint_interval = 5
 log_interval        = 5
 
 [environment]
-image_size                = 64
-max_steps                 = 10000
+image_size                = 128
+max_steps                 = 100000
 history_length            = 8
 food_track_limit          = 15
 food_detection_radius     = 1.0
@@ -35,7 +35,7 @@ bird_kill_penalty    = -10.0
 [world]
 chunk_size              = 16
 chunks_loaded           = 4
-plants_per_chunk        = 20
+plants_per_chunk        = 100
 day_cycle_length        = 100
 day_duration            = 50
 night_duration          = 50

@@ -15,7 +15,7 @@ import os
 import numpy as np
 import torch
 
-from butterfly.config import load_config, build_config_arg_group, apply_cli_overrides
+from butterfly.config import apply_cli_overrides, build_config_arg_group, load_config
 from butterfly.env.environment import ButterflyEnv
 from butterfly.utils import DEVICE, seed_everything
 
@@ -93,6 +93,8 @@ def main():
 
     import pygame
 
+    pygame.init()
+
     env = ButterflyEnv(config=cfg, seed=args.seed, render=True)
     env.human_control = True
 
@@ -118,8 +120,8 @@ def main():
                 if action is None:
                     action = np.zeros(2, dtype=np.float32)
 
-                next_obs, next_scalars, reward, terminated, truncated, info = (
-                    env.step(action)
+                next_obs, next_scalars, reward, terminated, truncated, info = env.step(
+                    action
                 )
                 cumulative_reward += reward
                 done = terminated or truncated
