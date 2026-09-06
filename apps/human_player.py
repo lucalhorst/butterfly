@@ -3,6 +3,7 @@
 Controls:
     Arrow keys / WASD   move the butterfly
     TAB                 toggle full stats
+    F1                  toggle the debug stats panel
     ESC / window close  quit
 
 Usage:

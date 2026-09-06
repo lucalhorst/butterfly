@@ -75,5 +75,6 @@ food_type_embedding_dim         = 8
 bird_state_embedding_dim        = 8
 
 [rendering]
-window_size = 600
-play_seed   = 123
+window_size        = 600
+stats_panel_width  = 350
+play_seed          = 123

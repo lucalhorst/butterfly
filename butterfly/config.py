@@ -146,6 +146,7 @@ class NetworkConfig(BaseModel):
 
 class RenderingConfig(BaseModel):
     window_size: int = 600
+    stats_panel_width: int = 350
     play_seed: int = 123
     play_speed: float = 20.0
     ai_player_seed: int = 123
@@ -273,6 +274,7 @@ CONFIG_ARG_DESTS = {
     },
     "rendering": {
         "rendering_window_size": "rendering.window_size",
+        "rendering_stats_panel_width": "rendering.stats_panel_width",
         "rendering_play_seed": "rendering.play_seed",
     },
 }
@@ -337,6 +339,7 @@ CONFIG_ARG_TYPES = {
     "network_food_type_embedding_dim": int,
     "network_bird_state_embedding_dim": int,
     "rendering_window_size": int,
+    "rendering_stats_panel_width": int,
     "rendering_play_seed": int,
 }
 
