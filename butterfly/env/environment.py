@@ -66,6 +66,29 @@ class ButterflyEnv:
     proximity.
     """
 
+    __slots__ = (
+        "config",
+        "collected",
+        "steps",
+        "rng",
+        "render_enabled",
+        "hunger",
+        "butterfly_world_pos",
+        "time_step",
+        "world",
+        "birds",
+        "window",
+        "clock",
+        "font",
+        "font_small",
+        "show_full_stats",
+        "show_stats_panel",
+        "is_daytime",
+        "display_stats",
+        "_last_scalar_inputs",
+        "human_control",
+    )
+
     def __init__(self, config: Config, seed=None, render=False):
         self.config = config
         self.rng = np.random.default_rng(seed)
@@ -78,7 +101,7 @@ class ButterflyEnv:
         self.time_step = 0
         self.is_daytime = True
 
-        self.world: WorldManager | None = None
+        # self.world: WorldManager | None = None
         self.birds: list[Bird] = []
 
         self.window = None
@@ -232,9 +255,7 @@ class ButterflyEnv:
 
         bird_info = []
         for bird in self.birds:
-            b_angle, b_dist, b_state = bird.get_relative_info(
-                self.butterfly_world_pos
-            )
+            b_angle, b_dist, b_state = bird.get_relative_info(self.butterfly_world_pos)
             bird_info.append((b_dist, b_angle, b_dist, b_state))
 
         bird_info.sort(key=lambda x: x[0])
@@ -373,9 +394,7 @@ class ButterflyEnv:
         cfg = self.config
         window_size = cfg.rendering.window_size
         stats_width = cfg.rendering.stats_panel_width
-        full_width = (
-            window_size + stats_width if self.show_stats_panel else window_size
-        )
+        full_width = window_size + stats_width if self.show_stats_panel else window_size
         half = window_size // 2
 
         if self.window is None or self.window.get_width() != full_width:
@@ -493,10 +512,10 @@ class ButterflyEnv:
                 state_counts = {}
                 for b in self.birds:
                     state_counts[b.state] = state_counts.get(b.state, 0) + 1
-                bird_summary = ", ".join(
-                    f"{c} {s}" for s, c in state_counts.items()
+                bird_summary = ", ".join(f"{c} {s}" for s, c in state_counts.items())
+                lines.append(
+                    (f"Birds: {len(self.birds)} ({bird_summary})", (200, 100, 100))
                 )
-                lines.append((f"Birds: {len(self.birds)} ({bird_summary})", (200, 100, 100)))
             else:
                 lines.append(("Birds: none", (200, 100, 100)))
             lines.append(("TAB: hide full stats", (100, 100, 100)))
@@ -543,9 +562,7 @@ class ButterflyEnv:
         surface.blit(title, (14, 5))
         hint = self.font_small.render("F1: close", True, _PANEL_MUTED)
         surface.blit(hint, (panel_w - hint.get_width() - 12, 7))
-        pygame.draw.line(
-            surface, (48, 48, 74), (8, 25), (panel_w - 8, 25)
-        )
+        pygame.draw.line(surface, (48, 48, 74), (8, 25), (panel_w - 8, 25))
         y = 30
 
         y = self._render_env_section(surface, y)
@@ -564,9 +581,7 @@ class ButterflyEnv:
         import pygame
 
         cfg = self.config
-        y = self._draw_section_header(
-            surface, "ENVIRONMENT", _SECTION_COLORS["env"], y
-        )
+        y = self._draw_section_header(surface, "ENVIRONMENT", _SECTION_COLORS["env"], y)
 
         pos = self.butterfly_world_pos
         y = self._draw_kv(surface, "pos", f"({pos[0]:.3f}, {pos[1]:.3f})", y)
@@ -588,9 +603,7 @@ class ButterflyEnv:
             y,
             color=_PANEL_GOOD,
         )
-        y = self._draw_progress_row(
-            surface, "hunger", self.hunger, hunger_color, y
-        )
+        y = self._draw_progress_row(surface, "hunger", self.hunger, hunger_color, y)
 
         cycle_pos = self.time_step % cfg.world.day_cycle_length
         cycle_frac = cycle_pos / cfg.world.day_cycle_length
@@ -603,9 +616,7 @@ class ButterflyEnv:
             if self.is_daytime
             else ((70, 60, 150), (210, 200, 255))
         )
-        surface.blit(
-            self.font_small.render("phase", True, _PANEL_LABEL), (16, y)
-        )
+        surface.blit(self.font_small.render("phase", True, _PANEL_LABEL), (16, y))
         self._draw_badge(
             surface,
             "DAY" if self.is_daytime else "NIGHT",
@@ -631,9 +642,7 @@ class ButterflyEnv:
             return y + _STATS_ROW_H
 
         context = scalars["context"]
-        ctx_text = (
-            f"[{context[0]:.3f}, {context[1]:.3f}, {context[2]:.2f}]"
-        )
+        ctx_text = f"[{context[0]:.3f}, {context[1]:.3f}, {context[2]:.2f}]"
         y = self._draw_kv(surface, "context", ctx_text, y)
 
         food_angle = scalars["food_angle"]
@@ -669,9 +678,7 @@ class ButterflyEnv:
 
         if active_food > shown:
             more = active_food - shown
-            more_surf = self.font_small.render(
-                f"+{more} more", True, _PANEL_MUTED
-            )
+            more_surf = self.font_small.render(f"+{more} more", True, _PANEL_MUTED)
             surface.blit(more_surf, (16, y))
             y += _STATS_ROW_H
 
@@ -681,9 +688,7 @@ class ButterflyEnv:
         bird_detected = scalars["bird_detected"]
         bird_mask = scalars["bird_mask"]
 
-        y = self._draw_table_header(
-            surface, "BIRD TRACKS", y
-        )
+        y = self._draw_table_header(surface, "BIRD TRACKS", y)
         for i in range(len(bird_angle)):
             if not bird_mask[i]:
                 continue
@@ -711,9 +716,7 @@ class ButterflyEnv:
     def _render_bird_section(self, surface, y):
         import pygame
 
-        y = self._draw_section_header(
-            surface, "BIRDS", _SECTION_COLORS["bird"], y
-        )
+        y = self._draw_section_header(surface, "BIRDS", _SECTION_COLORS["bird"], y)
 
         if not self.birds:
             surface.blit(
@@ -747,9 +750,7 @@ class ButterflyEnv:
             dist = float(np.linalg.norm(bird.pos - self.butterfly_world_pos))
             dist_col = _PANEL_GOOD if dist < 0.1 else _PANEL_VALUE
 
-            surface.blit(
-                self.font_small.render("state", True, _PANEL_LABEL), (16, y)
-            )
+            surface.blit(self.font_small.render("state", True, _PANEL_LABEL), (16, y))
             self._draw_badge(
                 surface,
                 state_name.upper(),
@@ -757,10 +758,10 @@ class ButterflyEnv:
                 78,
                 y,
             )
-            dist_surf = self.font_small.render(
-                f"dist {dist:.3f}", True, dist_col
+            dist_surf = self.font_small.render(f"dist {dist:.3f}", True, dist_col)
+            surface.blit(
+                dist_surf, (surface.get_width() - dist_surf.get_width() - 12, y)
             )
-            surface.blit(dist_surf, (surface.get_width() - dist_surf.get_width() - 12, y))
             y += _STATS_ROW_H
 
         return y
@@ -768,14 +769,10 @@ class ButterflyEnv:
     def _render_world_section(self, surface, y):
         import pygame
 
-        y = self._draw_section_header(
-            surface, "WORLD", _SECTION_COLORS["world"], y
-        )
+        y = self._draw_section_header(surface, "WORLD", _SECTION_COLORS["world"], y)
 
         chunk = self.world.current_chunk
-        y = self._draw_kv(
-            surface, "chunk", f"({chunk[0]}, {chunk[1]})", y
-        )
+        y = self._draw_kv(surface, "chunk", f"({chunk[0]}, {chunk[1]})", y)
         y = self._draw_kv(
             surface,
             "chunks loaded",
@@ -796,25 +793,17 @@ class ButterflyEnv:
         counts = {}
         for p in all_plants:
             counts[p["type"]] = counts.get(p["type"], 0) + 1
-        type_text = " ".join(
-            f"{k}:{v}" for k, v in counts.items()
-        )
+        type_text = " ".join(f"{k}:{v}" for k, v in counts.items())
         if not type_text:
             type_text = "none"
-        surface.blit(
-            self.font_small.render("types", True, _PANEL_LABEL), (16, y)
-        )
-        surface.blit(
-            self.font_small.render(type_text, True, _PANEL_VALUE), (78, y)
-        )
+        surface.blit(self.font_small.render("types", True, _PANEL_LABEL), (16, y))
+        surface.blit(self.font_small.render(type_text, True, _PANEL_VALUE), (78, y))
         return y + _STATS_ROW_H
 
     def _render_ai_section(self, surface, y):
         import pygame
 
-        y = self._draw_section_header(
-            surface, "AI OUTPUT", _SECTION_COLORS["ai"], y
-        )
+        y = self._draw_section_header(surface, "AI OUTPUT", _SECTION_COLORS["ai"], y)
 
         action = self.display_stats.get("action")
         if action is None:
@@ -832,9 +821,7 @@ class ButterflyEnv:
 
         reward = self.display_stats.get("cumulative_reward", 0.0)
         reward_col = _PANEL_GOOD if reward > 0.0 else _PANEL_BAD
-        y = self._draw_kv(
-            surface, "reward", f"{reward:.3f}", y, color=reward_col
-        )
+        y = self._draw_kv(surface, "reward", f"{reward:.3f}", y, color=reward_col)
         return y
 
     def _draw_section_header(self, surface, title, color, y):
@@ -842,9 +829,7 @@ class ButterflyEnv:
 
         surf = self.font.render(title, True, _PANEL_VALUE)
         surface.blit(surf, (14, y + 4))
-        pygame.draw.rect(
-            surface, color, (8, y + 3, 4, _STATS_HEADER_H - 9)
-        )
+        pygame.draw.rect(surface, color, (8, y + 3, 4, _STATS_HEADER_H - 9))
         pygame.draw.line(
             surface,
             (48, 48, 74),
@@ -853,11 +838,10 @@ class ButterflyEnv:
         )
         return y + _STATS_HEADER_H
 
-    def _draw_kv(self, surface, label, value, y, color=_PANEL_VALUE,
-                 row_h=_STATS_ROW_H):
-        surface.blit(
-            self.font_small.render(label, True, _PANEL_LABEL), (16, y)
-        )
+    def _draw_kv(
+        self, surface, label, value, y, color=_PANEL_VALUE, row_h=_STATS_ROW_H
+    ):
+        surface.blit(self.font_small.render(label, True, _PANEL_LABEL), (16, y))
         val_surf = self.font_small.render(value, True, color)
         surface.blit(
             val_surf,
@@ -868,13 +852,13 @@ class ButterflyEnv:
     def _draw_progress_row(self, surface, label, frac, color, y):
         import pygame
 
-        surface.blit(
-            self.font_small.render(label, True, _PANEL_LABEL), (16, y)
-        )
+        surface.blit(self.font_small.render(label, True, _PANEL_LABEL), (16, y))
         bar_x, bar_w, bar_h = 82, 150, 8
         bar_y = y + 3
         pygame.draw.rect(
-            surface, (48, 48, 74), (bar_x, bar_y, bar_w, bar_h),
+            surface,
+            (48, 48, 74),
+            (bar_x, bar_y, bar_w, bar_h),
             border_radius=4,
         )
         fill = int(bar_w * clamp(frac, 0.0, 1.0))
@@ -887,9 +871,7 @@ class ButterflyEnv:
         return y + _STATS_ROW_H
 
     def _draw_table_header(self, surface, text, y):
-        surface.blit(
-            self.font_small.render(text, True, _PANEL_MUTED), (16, y)
-        )
+        surface.blit(self.font_small.render(text, True, _PANEL_MUTED), (16, y))
         return y + _STATS_ROW_H
 
     def _draw_track_row(
@@ -905,26 +887,24 @@ class ButterflyEnv:
     ):
         import pygame
 
-        surface.blit(
-            self.font_small.render(f"{i:02d}", True, _PANEL_MUTED), (16, y)
-        )
+        surface.blit(self.font_small.render(f"{i:02d}", True, _PANEL_MUTED), (16, y))
         surface.blit(
             self.font_small.render(f"ang {angle:+.2f}", True, _PANEL_VALUE),
             (32, y),
         )
         bar_x, bar_w, bar_h = 100, 60, 7
         pygame.draw.rect(
-            surface, (48, 48, 74), (bar_x, y + 3, bar_w, bar_h),
+            surface,
+            (48, 48, 74),
+            (bar_x, y + 3, bar_w, bar_h),
             border_radius=3,
         )
         fill = int(bar_w * clamp(frac, 0.0, 1.0))
-        col = _PANEL_GOOD if frac > 0.7 else (
-            _PANEL_WARN if frac > 0.4 else _PANEL_VALUE
+        col = (
+            _PANEL_GOOD if frac > 0.7 else (_PANEL_WARN if frac > 0.4 else _PANEL_VALUE)
         )
         if fill > 0:
-            pygame.draw.rect(
-                surface, col, (bar_x, y + 3, fill, bar_h), border_radius=3
-            )
+            pygame.draw.rect(surface, col, (bar_x, y + 3, fill, bar_h), border_radius=3)
         self._draw_badge(surface, badge_name, badge_style, 166, y)
         return y + row_h
 
@@ -934,8 +914,6 @@ class ButterflyEnv:
         bg, fg = style
         text_surf = self.font_small.render(text, True, fg)
         w = text_surf.get_width() + 14
-        pygame.draw.rect(
-            surface, bg, (x, y, w, 14), border_radius=7
-        )
+        pygame.draw.rect(surface, bg, (x, y, w, 14), border_radius=7)
         surface.blit(text_surf, (x + 7, y + 1))
         return w
