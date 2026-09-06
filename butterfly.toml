@@ -17,15 +17,16 @@ log_tensorboard     = true
 
 [environment]
 image_size                = 64
+pixels_per_unit           = 1.0
 max_steps                 = 100000
 history_length            = 8
 food_track_limit          = 15
-food_detection_radius     = 1.0
-max_birds                 = 5
+food_detection_radius     = 8
+max_birds                 = 10
 initial_hunger            = 1.0
 hunger_depletion_per_step = 0.0002
 food_hunger_restore       = 0.35
-butterfly_speed           = 0.035
+butterfly_speed           = 0.5
 
 [environment.rewards]
 base_step            = -0.002
@@ -37,8 +38,8 @@ bird_kill_penalty    = -10.0
 
 [world]
 chunk_size              = 16
-chunks_loaded           = 4
-plants_per_chunk        = 100
+chunks_loaded           = 16
+plants_per_chunk        = 2
 day_cycle_length        = 100
 day_duration            = 50
 night_duration          = 50
@@ -56,26 +57,27 @@ random   = true
 
 [predator]
 enabled         = true
-speed           = 0.025
-detection_range = 0.3
-chase_speed     = 0.035
-patrol_range    = 2.0
+speed           = 0.25
+detection_range = 8
+chase_speed     = 0.35
+patrol_range    = 8.0
+spawn_radius    = 50.0
 
 [network]
-feature_size                    = 256
-temporal_transformer_heads      = 8
+feature_size                     = 256
+temporal_transformer_heads       = 8
 temporal_transformer_feedforward = 512
-temporal_transformer_dropout    = 0.1
-temporal_transformer_layers     = 3
-entity_transformer_heads        = 2
-entity_transformer_feedforward  = 192
-entity_transformer_dropout      = 0.1
-entity_transformer_layers       = 1
-food_type_embedding_dim         = 8
-bird_state_embedding_dim        = 8
+temporal_transformer_dropout     = 0.1
+temporal_transformer_layers      = 3
+entity_transformer_heads         = 2
+entity_transformer_feedforward   = 192
+entity_transformer_dropout       = 0.1
+entity_transformer_layers        = 1
+food_type_embedding_dim          = 8
+bird_state_embedding_dim         = 8
 
 [rendering]
-window_size        = 600
-stats_panel_width  = 350
-obs_panel_width    = 140
-play_seed          = 123
+window_size       = 600
+stats_panel_width = 350
+obs_panel_width   = 140
+play_seed         = 123

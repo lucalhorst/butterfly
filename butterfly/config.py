@@ -62,6 +62,7 @@ class RewardsConfig(BaseModel):
 
 class EnvironmentConfig(BaseModel):
     image_size: int = 64
+    pixels_per_unit: float = 1.0
     max_steps: int = 10000
     history_length: int = 8
     food_track_limit: int = 15
@@ -118,6 +119,7 @@ class PredatorConfig(BaseModel):
     detection_range: float = 0.3
     chase_speed: float = 0.035
     patrol_range: float = 2.0
+    spawn_radius: float = 50.0
 
 
 class NetworkConfig(BaseModel):

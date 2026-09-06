@@ -137,10 +137,17 @@ class ButterflyEnv:
 
         self.birds = []
         if cfg.predator.enabled:
+            spawn_radius = cfg.predator.spawn_radius
             for _ in range(cfg.environment.max_birds):
-                bird_spawn = self.rng.uniform(
-                    -cfg.world.chunk_size, cfg.world.chunk_size, size=2
-                ).astype(np.float32)
+                angle = self.rng.uniform(0, 2 * math.pi)
+                dist = spawn_radius * math.sqrt(self.rng.uniform(0, 1))
+                bird_spawn = (
+                    self.butterfly_world_pos
+                    + np.array(
+                        [dist * math.cos(angle), dist * math.sin(angle)],
+                        dtype=np.float32,
+                    )
+                )
                 self.birds.append(Bird(cfg.predator, bird_spawn, self.rng))
 
         observation = self.render_observation()
@@ -334,6 +341,7 @@ class ButterflyEnv:
     def render_observation(self):
         cfg = self.config
         image_size = cfg.environment.image_size
+        ppu = cfg.environment.pixels_per_unit
         image = np.zeros((3, image_size, image_size), dtype=np.float32)
 
         if self.is_daytime:
@@ -349,8 +357,8 @@ class ButterflyEnv:
 
         for plant_info in all_plants:
             relative = plant_info["world_pos"] - self.butterfly_world_pos
-            pixel_x = int(image_size / 2 + relative[0] * image_size)
-            pixel_y = int(image_size / 2 + relative[1] * image_size)
+            pixel_x = int(image_size / 2 + relative[0] * ppu)
+            pixel_y = int(image_size / 2 + relative[1] * ppu)
 
             if 2 <= pixel_x < image_size - 2 and 2 <= pixel_y < image_size - 2:
                 color = self._get_plant_color(plant_info["type"])
@@ -370,8 +378,8 @@ class ButterflyEnv:
 
         for bird in self.birds:
             bird_relative = bird.pos - self.butterfly_world_pos
-            bird_px = int(image_size / 2 + bird_relative[0] * image_size)
-            bird_py = int(image_size / 2 + bird_relative[1] * image_size)
+            bird_px = int(image_size / 2 + bird_relative[0] * ppu)
+            bird_py = int(image_size / 2 + bird_relative[1] * ppu)
 
             if 0 <= bird_px < image_size and 0 <= bird_py < image_size:
                 image[0, bird_py - 1 : bird_py + 2, bird_px - 1 : bird_px + 2] = 0.8
@@ -407,6 +415,11 @@ class ButterflyEnv:
         if self.show_obs_panel:
             full_width += obs_width
         half = window_size // 2
+        view_scale = (
+            window_size
+            * cfg.environment.pixels_per_unit
+            / cfg.environment.image_size
+        )
 
         if self.window is None or self.window.get_width() != full_width:
             pygame.init()
@@ -438,23 +451,36 @@ class ButterflyEnv:
 
         self.window.fill(bg_color)
 
-        visible_plants = self.world.get_visible_plants(
-            self.butterfly_world_pos, self.time_step
+        det_radius_px = int(
+            cfg.environment.food_detection_radius * view_scale
         )
+        pygame.draw.circle(
+            self.window,
+            (160, 160, 160),
+            (half, half),
+            det_radius_px,
+            1,
+        )
+
+        visible_plants = self.world.get_all_plants(self.butterfly_world_pos)
 
         for plant_info in visible_plants:
             relative = plant_info["world_pos"] - self.butterfly_world_pos
-            screen_x = half + int(relative[0] * half)
-            screen_y = half + int(relative[1] * half)
+            screen_x = int(window_size / 2 + relative[0] * view_scale)
+            screen_y = int(window_size / 2 + relative[1] * view_scale)
 
             if 0 <= screen_x < window_size and 0 <= screen_y < window_size:
                 color = self._get_plant_color_pygame(plant_info["type"])
+                if not plant_info["active"]:
+                    color = tuple(
+                        int(c * DIM_INACTIVE_PLANT) for c in color
+                    )
                 pygame.draw.circle(self.window, color, (screen_x, screen_y), 7)
 
         for bird in self.birds:
             bird_relative = bird.pos - self.butterfly_world_pos
-            bird_x = half + int(bird_relative[0] * half)
-            bird_y = half + int(bird_relative[1] * half)
+            bird_x = int(window_size / 2 + bird_relative[0] * view_scale)
+            bird_y = int(window_size / 2 + bird_relative[1] * view_scale)
 
             if 0 <= bird_x < window_size and 0 <= bird_y < window_size:
                 radius = 10
