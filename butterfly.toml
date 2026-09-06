@@ -77,4 +77,5 @@ bird_state_embedding_dim        = 8
 [rendering]
 window_size        = 600
 stats_panel_width  = 350
+obs_panel_width    = 140
 play_seed          = 123

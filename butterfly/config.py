@@ -147,6 +147,7 @@ class NetworkConfig(BaseModel):
 class RenderingConfig(BaseModel):
     window_size: int = 600
     stats_panel_width: int = 350
+    obs_panel_width: int = 140
     play_seed: int = 123
     play_speed: float = 20.0
     ai_player_seed: int = 123

@@ -83,9 +83,11 @@ class ButterflyEnv:
         "font_small",
         "show_full_stats",
         "show_stats_panel",
+        "show_obs_panel",
         "is_daytime",
         "display_stats",
         "_last_scalar_inputs",
+        "_last_observation",
         "human_control",
     )
 
@@ -109,8 +111,10 @@ class ButterflyEnv:
         self.font = None
         self.show_full_stats = False
         self.show_stats_panel = False
+        self.show_obs_panel = False
         self.display_stats = {}
         self._last_scalar_inputs = {}
+        self._last_observation = None
 
         # Human keyboard control (used by the human_player app).
         self.human_control = False
@@ -141,6 +145,7 @@ class ButterflyEnv:
 
         observation = self.render_observation()
         scalar_inputs = self.get_scalar_inputs()
+        self._last_observation = observation
 
         return observation, scalar_inputs
 
@@ -210,6 +215,7 @@ class ButterflyEnv:
 
         observation = self.render_observation()
         scalar_inputs = self.get_scalar_inputs()
+        self._last_observation = observation
 
         if self.render_enabled:
             self.render()
@@ -394,7 +400,12 @@ class ButterflyEnv:
         cfg = self.config
         window_size = cfg.rendering.window_size
         stats_width = cfg.rendering.stats_panel_width
-        full_width = window_size + stats_width if self.show_stats_panel else window_size
+        obs_width = cfg.rendering.obs_panel_width
+        full_width = window_size
+        if self.show_stats_panel:
+            full_width += stats_width
+        if self.show_obs_panel:
+            full_width += obs_width
         half = window_size // 2
 
         if self.window is None or self.window.get_width() != full_width:
@@ -417,6 +428,8 @@ class ButterflyEnv:
                     self.show_full_stats = not self.show_full_stats
                 elif event.key == pygame.K_F1:
                     self.show_stats_panel = not self.show_stats_panel
+                elif event.key == pygame.K_F2:
+                    self.show_obs_panel = not self.show_obs_panel
 
         if self.is_daytime:
             bg_color = (20, 80, 30)
@@ -535,6 +548,9 @@ class ButterflyEnv:
         if self.show_stats_panel:
             self._render_stats_panel()
 
+        if self.show_obs_panel:
+            self._render_obs_panel()
+
         pygame.display.flip()
         self.clock.tick(60)
 
@@ -546,6 +562,63 @@ class ButterflyEnv:
             "random": (200, 80, 200),
         }
         return colors.get(plant_type, (255, 255, 255))
+
+    def _render_obs_panel(self):
+        import pygame
+
+        cfg = self.config
+        window_size = cfg.rendering.window_size
+        stats_width = cfg.rendering.stats_panel_width
+        obs_width = cfg.rendering.obs_panel_width
+
+        panel_x = window_size
+        if self.show_stats_panel:
+            panel_x += stats_width
+
+        panel_rect = pygame.Rect(panel_x, 0, obs_width, window_size)
+        pygame.draw.rect(self.window, (25, 25, 35), panel_rect)
+        pygame.draw.line(
+            self.window,
+            (60, 60, 60),
+            (panel_x, 0),
+            (panel_x, window_size),
+            1,
+        )
+
+        y = 10
+
+        title = self.font.render("Observation", True, (220, 220, 220))
+        self.window.blit(title, (panel_x + 8, y))
+        y += 28
+
+        shape_str = self.font_small.render("3x64x64", True, (140, 140, 140))
+        self.window.blit(shape_str, (panel_x + 8, y))
+        y += 20
+
+        if self._last_observation is None:
+            y += 8
+            label = self.font_small.render("none", True, (100, 100, 100))
+            self.window.blit(label, (panel_x + 8, y))
+            return
+
+        obs = self._last_observation
+        image_size = obs.shape[1]
+
+        scale = max(1, int((obs_width * 0.8) // image_size))
+        display_size = image_size * scale
+        offset_x = panel_x + (obs_width - display_size) // 2
+
+        hwc = (np.clip(obs.transpose(1, 2, 0) * 255.0, 0, 255)).astype(np.uint8)
+        surface = pygame.surfarray.make_surface(hwc)
+        surface = pygame.transform.scale(surface, (display_size, display_size))
+        self.window.blit(surface, (offset_x, y))
+
+        inner = pygame.Rect(offset_x, y, display_size, display_size)
+        pygame.draw.rect(self.window, (120, 120, 120), inner, 1)
+
+        y += display_size + 10
+        label = self.font_small.render("F2: hide", True, (100, 100, 100))
+        self.window.blit(label, (panel_x + 8, y))
 
     def _render_stats_panel(self):
         import pygame
