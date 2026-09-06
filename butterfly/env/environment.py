@@ -610,6 +610,7 @@ class ButterflyEnv:
 
         hwc = (np.clip(obs.transpose(1, 2, 0) * 255.0, 0, 255)).astype(np.uint8)
         surface = pygame.surfarray.make_surface(hwc)
+        surface = pygame.transform.rotate(surface, 90)
         surface = pygame.transform.scale(surface, (display_size, display_size))
         self.window.blit(surface, (offset_x, y))
 
