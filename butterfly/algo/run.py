@@ -77,12 +77,15 @@ def run_ai_episodes(
 
         while not done:
             with torch.no_grad():
-                image_sequence, scalar_sequence = history.tensors()
+                image_sequence, scalar_dict = history.tensors()
 
                 image_sequence = image_sequence.unsqueeze(0).to(device)
-                scalar_sequence = scalar_sequence.unsqueeze(0).to(device)
+                scalar_dict = {
+                    key: tensor.unsqueeze(0).to(device)
+                    for key, tensor in scalar_dict.items()
+                }
 
-                action, _, value = policy.sample_action(image_sequence, scalar_sequence)
+                action, _, value = policy.sample_action(image_sequence, scalar_dict)
 
             action = action[0].cpu().numpy()
 

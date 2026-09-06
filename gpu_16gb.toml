@@ -8,3 +8,10 @@ rollout_length      = 512
 minibatch_size      = 512
 checkpoint_interval = 15
 log_interval        = 5
+
+[network]
+entity_transformer_heads       = 2
+entity_transformer_layers      = 1
+entity_transformer_feedforward = 192
+food_type_embedding_dim        = 8
+bird_state_embedding_dim       = 8

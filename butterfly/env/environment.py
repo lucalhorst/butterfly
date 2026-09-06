@@ -4,11 +4,21 @@ import math
 
 import numpy as np
 
-from butterfly.config import Config
-from butterfly.env.entities import Bird, BirdState, WorldManager
+from butterfly.config import (
+    BIRD_PAD_ID,
+    BIRD_STATE_TO_ID,
+    FOOD_PAD_ID,
+    FOOD_TYPE_TO_ID,
+    Config,
+)
+from butterfly.env.entities import Bird, WorldManager
 from butterfly.utils import clamp
 
 __all__ = ["ButterflyEnv"]
+
+# Multiplicative dim factor applied to a plant's color in the image
+# observation when it is currently inactive (not eatable). Purely visual.
+DIM_INACTIVE_PLANT = 0.4
 
 
 class ButterflyEnv:
@@ -17,8 +27,9 @@ class ButterflyEnv:
 
     The butterfly searches for flowers in a world with day-night cycles,
     multiple plant types, and a bird predator. Observation: RGB image
-    showing only eatable plants, plus scalar vector with all nearby
-    plants, time info, and bird proximity.
+    showing all plants in view (inactive ones dimmed), plus a structured
+    dict of scalar arrays with nearby eatable plants, time info, and bird
+    proximity.
     """
 
     def __init__(self, config: Config, seed=None, render=False):
@@ -160,6 +171,10 @@ class ButterflyEnv:
 
     def get_scalar_inputs(self):
         cfg = self.config
+        env_cfg = cfg.environment
+        food_track_limit = env_cfg.food_track_limit
+        max_birds = env_cfg.max_birds
+
         hunger = np.array([self.hunger], dtype=np.float32)
 
         time_normalized = (
@@ -168,79 +183,78 @@ class ButterflyEnv:
         time_input = np.array([time_normalized], dtype=np.float32)
         is_day_input = np.array([1.0 if self.is_daytime else 0.0], dtype=np.float32)
 
-        bird_angle = 0.0
-        bird_dist = 1.0
-        bird_state_roam = 1.0
-        bird_state_chase = 0.0
-        bird_state_return = 0.0
-        bird_detected = 0.0
+        context = np.concatenate([hunger, time_input, is_day_input]).astype(np.float32)
+
+        bird_angle = np.zeros(max_birds, dtype=np.float32)
+        bird_dist = np.ones(max_birds, dtype=np.float32)
+        bird_state_id = np.full(max_birds, BIRD_PAD_ID, dtype=np.int64)
+        bird_detected = np.zeros(max_birds, dtype=np.float32)
+        bird_mask = np.zeros(max_birds, dtype=bool)
 
         if self.bird is not None:
             b_angle, b_dist, b_state = self.bird.get_relative_info(
                 self.butterfly_world_pos
             )
-            bird_angle = b_angle
-            bird_dist = b_dist
+            idx = 0
+            bird_angle[idx] = b_angle
+            bird_dist[idx] = b_dist
+            bird_state_id[idx] = BIRD_STATE_TO_ID[b_state]
+            bird_detected[idx] = 1.0 if b_dist < 1.0 else 0.0
+            bird_mask[idx] = True
 
-            if b_state == BirdState.ROAM:
-                bird_state_roam = 1.0
-            elif b_state == BirdState.CHASE:
-                bird_state_chase = 1.0
-            elif b_state == BirdState.RETURN:
-                bird_state_return = 1.0
-
-            bird_detected = 1.0 if b_dist < 1.0 else 0.0
-
-        bird_input = np.array(
-            [
-                bird_angle,
-                bird_dist,
-                bird_state_roam,
-                bird_state_chase,
-                bird_state_return,
-            ],
-            dtype=np.float32,
-        )
-        bird_detected_input = np.array([bird_detected], dtype=np.float32)
-
+        # Food candidate pool: only *currently eatable* (active) plants.
+        # This eliminates the old truncation ambiguity -- every listed slot
+        # is actionable, since inactive plants are never candidates.
         all_plants = self.world.get_all_plants(self.butterfly_world_pos)
 
         detectable_food = []
         for plant_info in all_plants:
+            if not plant_info["active"]:
+                continue
+
             offset = plant_info["world_pos"] - self.butterfly_world_pos
             distance = float(np.linalg.norm(offset))
 
-            if distance <= cfg.environment.food_detection_radius:
+            if distance <= env_cfg.food_detection_radius:
                 angle = math.atan2(float(offset[1]), float(offset[0]))
                 normalized_angle = angle / math.pi
-                normalized_radius = distance / cfg.environment.food_detection_radius
-                is_eatable = 1.0 if plant_info["active"] else 0.0
+                normalized_radius = distance / env_cfg.food_detection_radius
                 detectable_food.append(
-                    (distance, normalized_angle, normalized_radius, is_eatable)
+                    (
+                        distance,
+                        normalized_angle,
+                        normalized_radius,
+                        FOOD_TYPE_TO_ID[plant_info["type"]],
+                    )
                 )
 
         detectable_food.sort(key=lambda item: item[0])
 
-        food_inputs = []
-        for i in range(cfg.environment.food_track_limit):
-            if i < len(detectable_food):
-                _, angle, radius, is_eatable = detectable_food[i]
-                food_inputs.extend([angle, radius, is_eatable])
-            else:
-                food_inputs.extend([0.0, 1.0, 0.0])
+        food_angle = np.zeros(food_track_limit, dtype=np.float32)
+        food_radius = np.ones(food_track_limit, dtype=np.float32)
+        food_type_id = np.full(food_track_limit, FOOD_PAD_ID, dtype=np.int64)
+        food_mask = np.zeros(food_track_limit, dtype=bool)
 
-        food_inputs = np.asarray(food_inputs, dtype=np.float32)
+        num_tracked = min(len(detectable_food), food_track_limit)
+        for i in range(num_tracked):
+            _, angle, radius, type_id = detectable_food[i]
+            food_angle[i] = angle
+            food_radius[i] = radius
+            food_type_id[i] = type_id
+            food_mask[i] = True
 
-        return np.concatenate(
-            [
-                hunger,
-                food_inputs,
-                time_input,
-                is_day_input,
-                bird_input,
-                bird_detected_input,
-            ]
-        )
+        return {
+            "context": context,
+            "food_angle": food_angle,
+            "food_radius": food_radius,
+            "food_type_id": food_type_id,
+            "food_mask": food_mask,
+            "bird_angle": bird_angle,
+            "bird_dist": bird_dist,
+            "bird_state_id": bird_state_id,
+            "bird_detected": bird_detected,
+            "bird_mask": bird_mask,
+        }
 
     def render_observation(self):
         cfg = self.config
@@ -256,17 +270,19 @@ class ButterflyEnv:
             image[1, :, :] = 0.05
             image[2, :, :] = 0.12
 
-        visible_plants = self.world.get_visible_plants(
-            self.butterfly_world_pos, self.time_step
-        )
+        all_plants = self.world.get_all_plants(self.butterfly_world_pos)
 
-        for plant_info in visible_plants:
+        for plant_info in all_plants:
             relative = plant_info["world_pos"] - self.butterfly_world_pos
             pixel_x = int(image_size / 2 + relative[0] * image_size)
             pixel_y = int(image_size / 2 + relative[1] * image_size)
 
             if 2 <= pixel_x < image_size - 2 and 2 <= pixel_y < image_size - 2:
                 color = self._get_plant_color(plant_info["type"])
+
+                if not plant_info["active"]:
+                    color = tuple(c * DIM_INACTIVE_PLANT for c in color)
+
                 image[0, pixel_y - 2 : pixel_y + 3, pixel_x - 2 : pixel_x + 3] = color[
                     0
                 ]

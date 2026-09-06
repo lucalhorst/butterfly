@@ -15,7 +15,7 @@ from butterfly.env.vec_env import SubprocVecEnv
 from butterfly.metrics import (METRIC_TAGS, CsvMetricLogger,
                                create_metrics_csv_path,
                                create_tensorboard_logdir)
-from butterfly.model.history import HistoryBuffer
+from butterfly.model.history import HistoryBuffer, stack_scalar_dicts
 from butterfly.model.policy import ButterflyPolicy
 from butterfly.utils import DEVICE, create_model_filename, print_progress_bar
 
@@ -154,8 +154,6 @@ def train(
         # a resumed run starts collecting fresh trajectories against the
         # loaded weights.
 
-    scalar_input_size = env_cfg.scalar_input_size()
-
     try:
         for update in range(total_updates):
             rollout_images = []
@@ -180,17 +178,20 @@ def train(
                 )
 
                 batch_images = []
-                batch_scalars = []
+                batch_scalar_dicts = []
 
                 for history in histories:
-                    images, scalars_tensor = history.tensors()
+                    images, scalars_dict = history.tensors()
 
                     batch_images.append(images)
-                    batch_scalars.append(scalars_tensor)
+                    batch_scalar_dicts.append(scalars_dict)
 
                 batch_images = torch.stack(batch_images).to(device)
 
-                batch_scalars = torch.stack(batch_scalars).to(device)
+                batch_scalars = {
+                    key: tensor.to(device)
+                    for key, tensor in stack_scalar_dicts(batch_scalar_dicts).items()
+                }
 
                 with torch.no_grad():
                     actions, log_probs, values = policy.sample_action(
@@ -228,7 +229,10 @@ def train(
                         with torch.no_grad():
                             _, _, bootstrap_value = policy.forward(
                                 terminal_images.unsqueeze(0).to(device),
-                                terminal_scalars.unsqueeze(0).to(device),
+                                {
+                                    key: tensor.unsqueeze(0).to(device)
+                                    for key, tensor in terminal_scalars.items()
+                                },
                             )
 
                         reward = reward + training.gamma * bootstrap_value.item()
@@ -247,7 +251,9 @@ def train(
 
                 rollout_images.append(batch_images.cpu())
 
-                rollout_scalars.append(batch_scalars.cpu())
+                rollout_scalars.append(
+                    {key: tensor.cpu() for key, tensor in batch_scalars.items()}
+                )
                 rollout_actions.append(actions.cpu())
                 rollout_log_probs.append(log_probs.cpu())
                 rollout_rewards.append(torch.tensor(step_rewards, dtype=torch.float32))
@@ -257,7 +263,9 @@ def train(
             print()  # move past the in-place rollout progress bar
 
             images = torch.stack(rollout_images)
-            scalars_tensor = torch.stack(rollout_scalars)
+            scalars_tensor = {}
+            for key in rollout_scalars[0]:
+                scalars_tensor[key] = torch.stack([d[key] for d in rollout_scalars])
             actions = torch.stack(rollout_actions)
             old_log_probs = torch.stack(rollout_log_probs)
             rewards = torch.stack(rollout_rewards)
@@ -272,11 +280,12 @@ def train(
                 env_cfg.image_size,
             )
 
-            scalars_tensor = scalars_tensor.reshape(
-                training.rollout_length * training.num_envs,
-                env_cfg.history_length,
-                scalar_input_size,
-            )
+            for key, tensor in scalars_tensor.items():
+                scalars_tensor[key] = tensor.reshape(
+                    training.rollout_length * training.num_envs,
+                    env_cfg.history_length,
+                    -1,
+                )
 
             actions = actions.reshape(
                 training.rollout_length * training.num_envs, 2
@@ -348,7 +357,10 @@ def train(
                     batch_indices = indices[start : start + training.minibatch_size]
 
                     batch_images = images[batch_indices].to(device)
-                    batch_scalars = scalars_tensor[batch_indices].to(device)
+                    batch_scalars = {
+                        key: tensor[batch_indices].to(device)
+                        for key, tensor in scalars_tensor.items()
+                    }
                     batch_actions = actions[batch_indices].to(device)
                     batch_old_log_probs = old_log_probs[batch_indices].to(device)
                     batch_advantages = advantages[batch_indices].to(device)

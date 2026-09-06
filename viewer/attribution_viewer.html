@@ -324,7 +324,7 @@
 
 <header>
   <h1>Policy Attribution Viewer</h1>
-  <p>Explore what drove the butterfly policy's action and value estimate at each step of a recorded episode: per-pixel image saliency, scalar feature gradients, transformer attention over the 8-frame history, and the vision/scalar fusion balance.</p>
+  <p>Explore what drove the butterfly policy's action and value estimate at each step of a recorded episode: per-pixel image saliency, scalar feature gradients, temporal transformer attention over the 8-frame history, and the image-vs-entity token balance inside the per-frame entity transformer.</p>
   <div class="load-row">
     <label class="file-btn" for="fileInput">Load attribution.json</label>
     <input type="file" id="fileInput" accept="application/json" />
@@ -368,7 +368,7 @@
 
     <div class="panel">
       <h2>Scalar feature attribution</h2>
-      <p class="sub">Gradient magnitude of the objective w.r.t. each scalar input, at the focused timestep.</p>
+      <p class="sub">Gradient magnitude of the objective w.r.t. each float scalar input (hunger/time + food angle/radius + bird angle/dist/detected), at the focused timestep.</p>
       <div id="scalarBars"></div>
       <button class="show-all-link" id="showAllScalars">Show all features</button>
     </div>
@@ -385,8 +385,8 @@
     </div>
 
     <div class="panel">
-      <h2>Vision vs. scalar fusion balance</h2>
-      <p class="sub">Relative gradient norm flowing through each branch just before fusion &mdash; a proxy for which modality is currently driving the decision.</p>
+      <h2>Image vs. entity token balance</h2>
+      <p class="sub">Relative gradient norm flowing through the image token vs. the entity tokens (context + food + bird) as they enter the per-frame entity transformer &mdash; a proxy for which modality is currently driving the decision.</p>
       <div class="fusion-bars" id="fusionBars"></div>
     </div>
 
@@ -640,11 +640,11 @@ function renderFusion() {
   const container = document.getElementById('fusionBars');
   container.innerHTML =
     `<div class="fusion-row">
-       <div class="lbl"><span>Vision (ResNet) branch</span><span class="pct mono">${visionPct.toFixed(1)}%</span></div>
+       <div class="lbl"><span>Image token</span><span class="pct mono">${visionPct.toFixed(1)}%</span></div>
        <div class="fusion-track"><div class="fusion-vision" style="width:${visionPct}%"></div></div>
      </div>
      <div class="fusion-row">
-       <div class="lbl"><span>Scalar branch</span><span class="pct mono">${scalarPct.toFixed(1)}%</span></div>
+       <div class="lbl"><span>Entity tokens (context/food/bird)</span><span class="pct mono">${scalarPct.toFixed(1)}%</span></div>
        <div class="fusion-track"><div class="fusion-scalar" style="width:${scalarPct}%"></div></div>
      </div>`;
 }

@@ -20,6 +20,12 @@ __all__ = [
     "NetworkConfig",
     "RenderingConfig",
     "Config",
+    "FOOD_TYPE_TO_ID",
+    "FOOD_PAD_ID",
+    "FOOD_TYPE_EMBEDDING_COUNT",
+    "BIRD_STATE_TO_ID",
+    "BIRD_PAD_ID",
+    "BIRD_STATE_EMBEDDING_COUNT",
     "load_config",
     "build_config_arg_group",
     "apply_cli_overrides",
@@ -60,17 +66,28 @@ class EnvironmentConfig(BaseModel):
     history_length: int = 8
     food_track_limit: int = 15
     food_detection_radius: float = 1.0
+    max_birds: int = 1
     initial_hunger: float = 1.0
     hunger_depletion_per_step: float = 0.002
     food_hunger_restore: float = 0.35
     butterfly_speed: float = 0.035
     rewards: RewardsConfig = Field(default_factory=RewardsConfig)
 
-    def scalar_input_size(self) -> int:
-        """Length of the scalar feature vector produced by
-        ``ButterflyEnv.get_scalar_inputs`` (hunger + per-food triples +
-        time + is_daytime + 5 bird features + bird_detected)."""
-        return 1 + self.food_track_limit * 3 + 1 + 1 + 5 + 1
+
+# Food type <-> id mapping used both by the environment (to build the
+# structured food_token observations) and by the model (to size/lookup the
+# food type embedding). Hardcoded per design decision; PAD_ID sits after the
+# real types and is used for the padding slots in a food token list that has
+# fewer real tokens than food_track_limit.
+FOOD_TYPE_TO_ID = {"day": 0, "night": 1, "interval": 2, "random": 3}
+FOOD_PAD_ID = len(FOOD_TYPE_TO_ID)
+FOOD_TYPE_EMBEDDING_COUNT = len(FOOD_TYPE_TO_ID) + 1
+
+# Bird state <-> id mapping (see BirdState in env.entities). PAD_ID used for
+# padding bird slots when fewer real birds exist than max_birds.
+BIRD_STATE_TO_ID = {"roam": 0, "chase": 1, "return": 2}
+BIRD_PAD_ID = len(BIRD_STATE_TO_ID)
+BIRD_STATE_EMBEDDING_COUNT = len(BIRD_STATE_TO_ID) + 1
 
 
 class WorldConfig(BaseModel):
@@ -105,10 +122,26 @@ class PredatorConfig(BaseModel):
 
 class NetworkConfig(BaseModel):
     feature_size: int = 256
-    transformer_heads: int = 8
-    transformer_feedforward: int = 512
-    transformer_dropout: float = 0.1
-    transformer_layers: int = 3
+
+    # Temporal transformer: runs over the per-frame summary vectors across
+    # the history_length window. (Formerly named transformer_*; renamed for
+    # clarity once a per-frame entity transformer was added.)
+    temporal_transformer_heads: int = 8
+    temporal_transformer_feedforward: int = 512
+    temporal_transformer_dropout: float = 0.1
+    temporal_transformer_layers: int = 3
+
+    # Entity transformer: a separate, smaller transformer that runs once per
+    # timestep over the image + context + food + bird entity tokens.
+    entity_transformer_heads: int = 2
+    entity_transformer_feedforward: int = 192
+    entity_transformer_dropout: float = 0.1
+    entity_transformer_layers: int = 1
+
+    # Per-token embedding dims for the food type and bird state categorical
+    # inputs (each +1 slot for the PAD id).
+    food_type_embedding_dim: int = 8
+    bird_state_embedding_dim: int = 8
 
 
 class RenderingConfig(BaseModel):
@@ -193,6 +226,7 @@ CONFIG_ARG_DESTS = {
         "environment_history_length": "environment.history_length",
         "environment_food_track_limit": "environment.food_track_limit",
         "environment_food_detection_radius": "environment.food_detection_radius",
+        "environment_max_birds": "environment.max_birds",
         "environment_initial_hunger": "environment.initial_hunger",
         "environment_hunger_depletion_per_step": "environment.hunger_depletion_per_step",
         "environment_food_hunger_restore": "environment.food_hunger_restore",
@@ -226,10 +260,16 @@ CONFIG_ARG_DESTS = {
     },
     "network": {
         "network_feature_size": "network.feature_size",
-        "network_transformer_heads": "network.transformer_heads",
-        "network_transformer_feedforward": "network.transformer_feedforward",
-        "network_transformer_dropout": "network.transformer_dropout",
-        "network_transformer_layers": "network.transformer_layers",
+        "network_temporal_transformer_heads": "network.temporal_transformer_heads",
+        "network_temporal_transformer_feedforward": "network.temporal_transformer_feedforward",
+        "network_temporal_transformer_dropout": "network.temporal_transformer_dropout",
+        "network_temporal_transformer_layers": "network.temporal_transformer_layers",
+        "network_entity_transformer_heads": "network.entity_transformer_heads",
+        "network_entity_transformer_feedforward": "network.entity_transformer_feedforward",
+        "network_entity_transformer_dropout": "network.entity_transformer_dropout",
+        "network_entity_transformer_layers": "network.entity_transformer_layers",
+        "network_food_type_embedding_dim": "network.food_type_embedding_dim",
+        "network_bird_state_embedding_dim": "network.bird_state_embedding_dim",
     },
     "rendering": {
         "rendering_window_size": "rendering.window_size",
@@ -260,6 +300,7 @@ CONFIG_ARG_TYPES = {
     "environment_history_length": int,
     "environment_food_track_limit": int,
     "environment_food_detection_radius": float,
+    "environment_max_birds": int,
     "environment_initial_hunger": float,
     "environment_hunger_depletion_per_step": float,
     "environment_food_hunger_restore": float,
@@ -285,10 +326,16 @@ CONFIG_ARG_TYPES = {
     "predator_chase_speed": float,
     "predator_patrol_range": float,
     "network_feature_size": int,
-    "network_transformer_heads": int,
-    "network_transformer_feedforward": int,
-    "network_transformer_dropout": float,
-    "network_transformer_layers": int,
+    "network_temporal_transformer_heads": int,
+    "network_temporal_transformer_feedforward": int,
+    "network_temporal_transformer_dropout": float,
+    "network_temporal_transformer_layers": int,
+    "network_entity_transformer_heads": int,
+    "network_entity_transformer_feedforward": int,
+    "network_entity_transformer_dropout": float,
+    "network_entity_transformer_layers": int,
+    "network_food_type_embedding_dim": int,
+    "network_bird_state_embedding_dim": int,
     "rendering_window_size": int,
     "rendering_play_seed": int,
 }
