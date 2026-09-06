@@ -12,12 +12,9 @@ from torch.utils.tensorboard import SummaryWriter
 
 from butterfly.config import Config
 from butterfly.env.vec_env import SubprocVecEnv
-from butterfly.metrics import (
-    METRIC_TAGS,
-    CsvMetricLogger,
-    create_metrics_csv_path,
-    create_tensorboard_logdir,
-)
+from butterfly.metrics import (METRIC_TAGS, CsvMetricLogger,
+                               create_metrics_csv_path,
+                               create_tensorboard_logdir)
 from butterfly.model.history import HistoryBuffer
 from butterfly.model.policy import ButterflyPolicy
 from butterfly.utils import DEVICE, create_model_filename, print_progress_bar
@@ -398,7 +395,7 @@ def train(
                     entropy_losses.append(entropy_loss.item())
                     total_losses.append(loss.item())
                     kl_divs.append(
-                        (new_log_probs - batch_old_log_probs).mean().item()
+                        (batch_old_log_probs-new_log_probs  ).mean().item()
                     )
                     clip_fractions.append(
                         ((ratio - 1.0).abs() > training.clip_epsilon)

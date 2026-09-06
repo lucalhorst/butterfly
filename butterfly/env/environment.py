@@ -33,7 +33,7 @@ class ButterflyEnv:
         self.time_step = 0
         self.is_daytime = True
 
-        self.world = None
+        self.world: WorldManager | None = None
         self.bird = None
 
         self.window = None
@@ -361,7 +361,30 @@ class ButterflyEnv:
             bird_y = half + int(bird_relative[1] * half)
 
             if 0 <= bird_x < window_size and 0 <= bird_y < window_size:
-                pygame.draw.circle(self.window, (200, 30, 30), (bird_x, bird_y), 10)
+                radius = 10
+                heading = self.bird.heading  # radians, world space
+
+                # Nose point: straight ahead along heading.
+                nose = (
+                    bird_x + radius * math.cos(heading),
+                    bird_y + radius * math.sin(heading),
+                )
+                # Back two corners: offset +/-140 degrees from heading, pulled
+                # in to about 70% of radius so the triangle doesn't look too
+                # needle-thin.
+                back_spread = math.radians(140)
+                back_left = (
+                    bird_x + 0.7 * radius * math.cos(heading + back_spread),
+                    bird_y + 0.7 * radius * math.sin(heading + back_spread),
+                )
+                back_right = (
+                    bird_x + 0.7 * radius * math.cos(heading - back_spread),
+                    bird_y + 0.7 * radius * math.sin(heading - back_spread),
+                )
+
+                pygame.draw.polygon(
+                    self.window, (200, 30, 30), [nose, back_left, back_right]
+                )
 
         bx = half
         by = half

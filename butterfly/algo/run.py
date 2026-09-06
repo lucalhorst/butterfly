@@ -60,7 +60,9 @@ def run_ai_episodes(
         import time
 
         clock = _make_clock()
-        speed = render_speed if render_speed is not None else config.rendering.play_speed
+        speed = (
+            render_speed if render_speed is not None else config.rendering.play_speed
+        )
 
     env = ButterflyEnv(config=config, seed=seed, render=render)
 
@@ -80,9 +82,7 @@ def run_ai_episodes(
                 image_sequence = image_sequence.unsqueeze(0).to(device)
                 scalar_sequence = scalar_sequence.unsqueeze(0).to(device)
 
-                action, _, value = policy.sample_action(
-                    image_sequence, scalar_sequence
-                )
+                action, _, value = policy.sample_action(image_sequence, scalar_sequence)
 
             action = action[0].cpu().numpy()
 
@@ -104,7 +104,7 @@ def run_ai_episodes(
             if render:
                 clock.tick(speed)
 
-            if not env.render_enabled:
+            if render and (not env.render_enabled):
                 # User closed the window (or rendering was disabled mid-run);
                 # stop early.
                 done = True
@@ -124,3 +124,4 @@ def _make_clock():
 
     pygame.init()
     return pygame.time.Clock()
+

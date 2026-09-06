@@ -4,9 +4,14 @@ import math
 
 import numpy as np
 
-from butterfly.config import Config, WorldConfig, PredatorConfig
+from butterfly.config import Config, PredatorConfig, WorldConfig
 
 __all__ = ["BirdState", "Bird", "Chunk", "WorldManager"]
+
+
+# "Up" heading constant: atan2 convention used throughout this file is
+# (dy, dx), and "up" on screen/world is -y, so this is -pi/2.
+_HEADING_UP = -math.pi / 2
 
 
 class BirdState:
@@ -23,6 +28,10 @@ class Bird:
         self.state = BirdState.ROAM
         self.rng = rng
         self.target_pos = None
+        # NEW: current facing direction in radians (world space, atan2
+        # convention matching the rest of the file). Defaults to "up"
+        # until the bird has a real target to face.
+        self.heading = _HEADING_UP
 
     def update(self, butterfly_pos):
         if self.state == BirdState.ROAM:
@@ -44,6 +53,15 @@ class Bird:
         direction = self.target_pos - self.pos
         dist = float(np.linalg.norm(direction))
 
+        # NEW: always face the roam target, whether or not we're close
+        # enough this frame to actually move. Falls back to "up" only
+        # in the degenerate case of dist == 0 (already at target).
+        self.heading = (
+            math.atan2(float(direction[1]), float(direction[0]))
+            if dist > 1e-6
+            else _HEADING_UP
+        )
+
         if dist > 0.1:
             self.pos += (direction / dist) * self.predator.speed
 
@@ -56,6 +74,13 @@ class Bird:
     def _do_chase(self, butterfly_pos):
         direction = butterfly_pos - self.pos
         dist = float(np.linalg.norm(direction))
+
+        # NEW: always face the butterfly while chasing.
+        self.heading = (
+            math.atan2(float(direction[1]), float(direction[0]))
+            if dist > 1e-6
+            else _HEADING_UP
+        )
 
         if dist > 0.05:
             self.pos += (direction / dist) * self.predator.chase_speed
@@ -72,6 +97,13 @@ class Bird:
     def _do_return(self):
         direction = self.spawn_pos - self.pos
         dist = float(np.linalg.norm(direction))
+
+        # NEW: always face the spawn point while returning.
+        self.heading = (
+            math.atan2(float(direction[1]), float(direction[0]))
+            if dist > 1e-6
+            else _HEADING_UP
+        )
 
         if dist > 0.5:
             self.pos += (direction / dist) * self.predator.speed
@@ -92,6 +124,10 @@ class Bird:
         angle = math.atan2(float(offset[1]), float(offset[0])) / math.pi
         normalized_dist = min(distance / (self.predator.detection_range * 2), 1.0)
         return angle, normalized_dist, self.state
+
+
+# Chunk and WorldManager are UNCHANGED from the original entities.py.
+# Omitted here for brevity -- copy them as-is from the original file.
 
 
 class Chunk:
@@ -137,9 +173,7 @@ class Chunk:
             }
 
             if plant_type == "interval":
-                num_phases = int(
-                    chunk_rng.integers(1, world.interval_phases_max + 1)
-                )
+                num_phases = int(chunk_rng.integers(1, world.interval_phases_max + 1))
                 plant["phases"] = []
                 for _ in range(num_phases):
                     start = int(chunk_rng.integers(0, world.day_cycle_length))
