@@ -4,13 +4,8 @@ import math
 
 import numpy as np
 
-from butterfly.config import (
-    BIRD_PAD_ID,
-    BIRD_STATE_TO_ID,
-    FOOD_PAD_ID,
-    FOOD_TYPE_TO_ID,
-    Config,
-)
+from butterfly.config import (BIRD_PAD_ID, BIRD_STATE_TO_ID, FOOD_PAD_ID,
+                              FOOD_TYPE_TO_ID, Config)
 from butterfly.env.entities import Bird, WorldManager
 from butterfly.utils import clamp
 
@@ -141,12 +136,9 @@ class ButterflyEnv:
             for _ in range(cfg.environment.max_birds):
                 angle = self.rng.uniform(0, 2 * math.pi)
                 dist = spawn_radius * math.sqrt(self.rng.uniform(0, 1))
-                bird_spawn = (
-                    self.butterfly_world_pos
-                    + np.array(
-                        [dist * math.cos(angle), dist * math.sin(angle)],
-                        dtype=np.float32,
-                    )
+                bird_spawn = self.butterfly_world_pos + np.array(
+                    [dist * math.cos(angle), dist * math.sin(angle)],
+                    dtype=np.float32,
                 )
                 self.birds.append(Bird(cfg.predator, bird_spawn, self.rng))
 
@@ -376,6 +368,11 @@ class ButterflyEnv:
                     2
                 ]
 
+        center = image_size // 2
+        image[0, center - 2 : center + 3, center - 2 : center + 3] = 0.9
+        image[1, center - 2 : center + 3, center - 2 : center + 3] = 0.2
+        image[2, center - 2 : center + 3, center - 2 : center + 3] = 0.9
+
         for bird in self.birds:
             bird_relative = bird.pos - self.butterfly_world_pos
             bird_px = int(image_size / 2 + bird_relative[0] * ppu)
@@ -385,11 +382,6 @@ class ButterflyEnv:
                 image[0, bird_py - 1 : bird_py + 2, bird_px - 1 : bird_px + 2] = 0.8
                 image[1, bird_py - 1 : bird_py + 2, bird_px - 1 : bird_px + 2] = 0.1
                 image[2, bird_py - 1 : bird_py + 2, bird_px - 1 : bird_px + 2] = 0.1
-
-        center = image_size // 2
-        image[0, center - 2 : center + 3, center - 2 : center + 3] = 0.9
-        image[1, center - 2 : center + 3, center - 2 : center + 3] = 0.2
-        image[2, center - 2 : center + 3, center - 2 : center + 3] = 0.9
 
         return image
 
@@ -416,9 +408,7 @@ class ButterflyEnv:
             full_width += obs_width
         half = window_size // 2
         view_scale = (
-            window_size
-            * cfg.environment.pixels_per_unit
-            / cfg.environment.image_size
+            window_size * cfg.environment.pixels_per_unit / cfg.environment.image_size
         )
 
         if self.window is None or self.window.get_width() != full_width:
@@ -451,9 +441,7 @@ class ButterflyEnv:
 
         self.window.fill(bg_color)
 
-        det_radius_px = int(
-            cfg.environment.food_detection_radius * view_scale
-        )
+        det_radius_px = int(cfg.environment.food_detection_radius * view_scale)
         pygame.draw.circle(
             self.window,
             (160, 160, 160),
@@ -472,9 +460,7 @@ class ButterflyEnv:
             if 0 <= screen_x < window_size and 0 <= screen_y < window_size:
                 color = self._get_plant_color_pygame(plant_info["type"])
                 if not plant_info["active"]:
-                    color = tuple(
-                        int(c * DIM_INACTIVE_PLANT) for c in color
-                    )
+                    color = tuple(int(c * DIM_INACTIVE_PLANT) for c in color)
                 pygame.draw.circle(self.window, color, (screen_x, screen_y), 7)
 
         for bird in self.birds:
@@ -636,7 +622,7 @@ class ButterflyEnv:
 
         hwc = (np.clip(obs.transpose(1, 2, 0) * 255.0, 0, 255)).astype(np.uint8)
         surface = pygame.surfarray.make_surface(hwc)
-        surface = pygame.transform.rotate(surface, 90)
+        surface = pygame.transform.rotate(surface, -90)
         surface = pygame.transform.scale(surface, (display_size, display_size))
         self.window.blit(surface, (offset_x, y))
 
