@@ -79,7 +79,7 @@ class ButterflyEnv:
         self.is_daytime = True
 
         self.world: WorldManager | None = None
-        self.bird = None
+        self.birds: list[Bird] = []
 
         self.window = None
         self.clock = None
@@ -108,13 +108,13 @@ class ButterflyEnv:
 
         self.world.update(self.butterfly_world_pos)
 
+        self.birds = []
         if cfg.predator.enabled:
-            bird_spawn = self.rng.uniform(
-                -cfg.world.chunk_size, cfg.world.chunk_size, size=2
-            ).astype(np.float32)
-            self.bird = Bird(cfg.predator, bird_spawn, self.rng)
-        else:
-            self.bird = None
+            for _ in range(cfg.environment.max_birds):
+                bird_spawn = self.rng.uniform(
+                    -cfg.world.chunk_size, cfg.world.chunk_size, size=2
+                ).astype(np.float32)
+                self.birds.append(Bird(cfg.predator, bird_spawn, self.rng))
 
         observation = self.render_observation()
         scalar_inputs = self.get_scalar_inputs()
@@ -169,9 +169,11 @@ class ButterflyEnv:
                 plant_ref["cooldown_until"] = self.time_step + cfg.world.plant_cooldown
 
         bird_killed = False
-        if cfg.predator.enabled and self.bird is not None:
-            bird_result = self.bird.update(self.butterfly_world_pos)
-            bird_killed = bird_result == "kill"
+        if cfg.predator.enabled:
+            for bird in self.birds:
+                bird_result = bird.update(self.butterfly_world_pos)
+                if bird_result == "kill":
+                    bird_killed = True
 
         hunger_dead = self.hunger <= 0.0
         terminated = hunger_dead or bird_killed
@@ -200,7 +202,8 @@ class ButterflyEnv:
                 "hunger": self.hunger,
                 "time_step": self.time_step,
                 "is_daytime": self.is_daytime,
-                "bird_state": self.bird.state if self.bird is not None else None,
+                "bird_states": [b.state for b in self.birds],
+                "bird_state": self.birds[0].state if self.birds else None,
                 "bird_killed": bird_killed,
             },
         )
@@ -227,16 +230,23 @@ class ButterflyEnv:
         bird_detected = np.zeros(max_birds, dtype=np.float32)
         bird_mask = np.zeros(max_birds, dtype=bool)
 
-        if self.bird is not None:
-            b_angle, b_dist, b_state = self.bird.get_relative_info(
+        bird_info = []
+        for bird in self.birds:
+            b_angle, b_dist, b_state = bird.get_relative_info(
                 self.butterfly_world_pos
             )
-            idx = 0
-            bird_angle[idx] = b_angle
-            bird_dist[idx] = b_dist
-            bird_state_id[idx] = BIRD_STATE_TO_ID[b_state]
-            bird_detected[idx] = 1.0 if b_dist < 1.0 else 0.0
-            bird_mask[idx] = True
+            bird_info.append((b_dist, b_angle, b_dist, b_state))
+
+        bird_info.sort(key=lambda x: x[0])
+
+        num_birds = min(len(bird_info), max_birds)
+        for i in range(num_birds):
+            _, b_angle, b_dist, b_state = bird_info[i]
+            bird_angle[i] = b_angle
+            bird_dist[i] = b_dist
+            bird_state_id[i] = BIRD_STATE_TO_ID[b_state]
+            bird_detected[i] = 1.0 if b_dist < 1.0 else 0.0
+            bird_mask[i] = True
 
         # Food candidate pool: only *currently eatable* (active) plants.
         # This eliminates the old truncation ambiguity -- every listed slot
@@ -331,8 +341,8 @@ class ButterflyEnv:
                     2
                 ]
 
-        if self.bird is not None:
-            bird_relative = self.bird.pos - self.butterfly_world_pos
+        for bird in self.birds:
+            bird_relative = bird.pos - self.butterfly_world_pos
             bird_px = int(image_size / 2 + bird_relative[0] * image_size)
             bird_py = int(image_size / 2 + bird_relative[1] * image_size)
 
@@ -409,23 +419,19 @@ class ButterflyEnv:
                 color = self._get_plant_color_pygame(plant_info["type"])
                 pygame.draw.circle(self.window, color, (screen_x, screen_y), 7)
 
-        if self.bird is not None:
-            bird_relative = self.bird.pos - self.butterfly_world_pos
+        for bird in self.birds:
+            bird_relative = bird.pos - self.butterfly_world_pos
             bird_x = half + int(bird_relative[0] * half)
             bird_y = half + int(bird_relative[1] * half)
 
             if 0 <= bird_x < window_size and 0 <= bird_y < window_size:
                 radius = 10
-                heading = self.bird.heading  # radians, world space
+                heading = bird.heading
 
-                # Nose point: straight ahead along heading.
                 nose = (
                     bird_x + radius * math.cos(heading),
                     bird_y + radius * math.sin(heading),
                 )
-                # Back two corners: offset +/-140 degrees from heading, pulled
-                # in to about 70% of radius so the triangle doesn't look too
-                # needle-thin.
                 back_spread = math.radians(140)
                 back_left = (
                     bird_x + 0.7 * radius * math.cos(heading + back_spread),
@@ -483,8 +489,16 @@ class ButterflyEnv:
                 lines.append(
                     (f"Action: [{action[0]:+.3f}, {action[1]:+.3f}]", (180, 180, 180))
                 )
-            bird_state_str = self.bird.state if self.bird else "N/A"
-            lines.append((f"Bird: {bird_state_str}", (200, 100, 100)))
+            if self.birds:
+                state_counts = {}
+                for b in self.birds:
+                    state_counts[b.state] = state_counts.get(b.state, 0) + 1
+                bird_summary = ", ".join(
+                    f"{c} {s}" for s, c in state_counts.items()
+                )
+                lines.append((f"Birds: {len(self.birds)} ({bird_summary})", (200, 100, 100)))
+            else:
+                lines.append(("Birds: none", (200, 100, 100)))
             lines.append(("TAB: hide full stats", (100, 100, 100)))
         else:
             lines.append(("TAB: full stats", (100, 100, 100)))
@@ -698,54 +712,58 @@ class ButterflyEnv:
         import pygame
 
         y = self._draw_section_header(
-            surface, "BIRD", _SECTION_COLORS["bird"], y
+            surface, "BIRDS", _SECTION_COLORS["bird"], y
         )
 
-        if self.bird is None:
+        if not self.birds:
             surface.blit(
                 self.font_small.render("predator disabled", True, _PANEL_MUTED),
                 (16, y),
             )
             return y + _STATS_ROW_H
 
-        pos = self.bird.pos
-        y = self._draw_kv(surface, "pos", f"({pos[0]:.3f}, {pos[1]:.3f})", y)
-        h = float(self.bird.heading)
-        y = self._draw_kv(
-            surface,
-            "heading",
-            f"{math.degrees(h):.1f} deg ({h:+.2f} rad)",
-            y,
-        )
-        target = self.bird.target_pos
-        if target is None:
-            y = self._draw_kv(surface, "target", "—", y)
-        else:
-            y = self._draw_kv(
-                surface,
-                "target",
-                f"({target[0]:.3f}, {target[1]:.3f})",
-                y,
+        for idx, bird in enumerate(self.birds):
+            if idx > 0:
+                pygame.draw.line(
+                    surface, (48, 48, 74), (16, y), (surface.get_width() - 16, y)
+                )
+                y += 2
+
+            surface.blit(
+                self.font_small.render(f"[{idx}]", True, _PANEL_MUTED), (16, y)
             )
 
-        dist = float(np.linalg.norm(self.bird.pos - self.butterfly_world_pos))
-        surface.blit(
-            self.font_small.render("state", True, _PANEL_LABEL), (16, y)
-        )
-        state_name = self.bird.state if self.bird.state else "roam"
-        self._draw_badge(
-            surface,
-            state_name.upper(),
-            _BIRD_STATE_STYLE.get(state_name, _FOOD_TYPE_STYLE[4]),
-            78,
-            y,
-        )
-        dist_col = _PANEL_GOOD if dist < 0.1 else _PANEL_VALUE
-        dist_surf = self.font_small.render(
-            f"dist {dist:.3f}", True, dist_col
-        )
-        surface.blit(dist_surf, (surface.get_width() - dist_surf.get_width() - 12, y))
-        return y + _STATS_ROW_H
+            pos = bird.pos
+            surface.blit(
+                self.font_small.render(
+                    f"pos ({pos[0]:.2f}, {pos[1]:.2f})", True, _PANEL_VALUE
+                ),
+                (40, y),
+            )
+            y += _STATS_ROW_H
+
+            h = float(bird.heading)
+            state_name = bird.state if bird.state else "roam"
+            dist = float(np.linalg.norm(bird.pos - self.butterfly_world_pos))
+            dist_col = _PANEL_GOOD if dist < 0.1 else _PANEL_VALUE
+
+            surface.blit(
+                self.font_small.render("state", True, _PANEL_LABEL), (16, y)
+            )
+            self._draw_badge(
+                surface,
+                state_name.upper(),
+                _BIRD_STATE_STYLE.get(state_name, _FOOD_TYPE_STYLE[4]),
+                78,
+                y,
+            )
+            dist_surf = self.font_small.render(
+                f"dist {dist:.3f}", True, dist_col
+            )
+            surface.blit(dist_surf, (surface.get_width() - dist_surf.get_width() - 12, y))
+            y += _STATS_ROW_H
+
+        return y
 
     def _render_world_section(self, surface, y):
         import pygame

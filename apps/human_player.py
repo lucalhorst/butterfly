@@ -135,7 +135,7 @@ def main():
                     f"food collected={info['food_collected']} | "
                     f"hunger={info['hunger']:.2f} | "
                     f"time_step={info['time_step']} | "
-                    f"bird_state={info['bird_state']} | "
+                    f"bird_states={info['bird_states']} | "
                     f"total reward={cumulative_reward:.2f}"
                 )
     finally:

@@ -118,6 +118,7 @@ def run_ai_episodes(
             "hunger": info["hunger"],
             "time_step": info["time_step"],
             "bird_state": info["bird_state"],
+            "bird_states": info["bird_states"],
             "total_reward": cumulative_reward,
         }
 

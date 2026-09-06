@@ -107,7 +107,7 @@ def main():
             f"food collected={stats['food_collected']} | "
             f"hunger={stats['hunger']:.2f} | "
             f"time_step={stats['time_step']} | "
-            f"bird_state={stats['bird_state']} | "
+            f"bird_states={stats['bird_states']} | "
             f"total reward={stats['total_reward']:.2f}"
         )
 
