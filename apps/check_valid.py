@@ -36,12 +36,13 @@ def main():
         for file in files:
             if file.endswith((".pt", ".pth", ".ckpt")):
                 checkpoint_path = os.path.join(root, file)
-                print(f"Testing model: {checkpoint_path}")
+                print(f"Testing model: {checkpoint_path}.".ljust(100), end=" ")
                 try:
                     policy = load_policy(cfg, checkpoint_path)
+                    print(f"model can be loaded")
                     # Optionally: Add validation logic here
                 except Exception as e:
-                    print(f"Failed to load {checkpoint_path}")
+                    print(f"loading failed")
 
 
 if __name__ == "__main__":
