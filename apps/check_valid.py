@@ -16,12 +16,11 @@ def build_parser():
         default=None,
         help="Path to TOML config file (default: butterfly.toml)",
     )
-
     parser.add_argument(
         "--weight-folder",
         type=str,
-        default="./configs/",
-        help=("folder of the model checkpoints. If omitted, the folder is models/."),
+        default="./models/",
+        help="Folder of the model checkpoints (default: ./models/)",
     )
     return parser
 
@@ -29,13 +28,20 @@ def build_parser():
 def main():
     parser = build_parser()
     args = parser.parse_args()
-
     cfg = load_config(args.config)
     cfg = apply_cli_overrides(cfg, args)
 
-    for file in os.walk(Path(args.weight_folder)):
-        policy = load_policy(cfg, file)
-        del policy
+    weight_folder = Path(args.weight_folder)
+    for root, _, files in os.walk(weight_folder):
+        for file in files:
+            if file.endswith((".pt", ".pth", ".ckpt")):
+                checkpoint_path = os.path.join(root, file)
+                print(f"Testing model: {checkpoint_path}")
+                try:
+                    policy = load_policy(cfg, checkpoint_path)
+                    # Optionally: Add validation logic here
+                except Exception as e:
+                    print(f"Failed to load {checkpoint_path}")
 
 
 if __name__ == "__main__":
