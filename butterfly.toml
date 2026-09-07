@@ -18,7 +18,7 @@ log_tensorboard     = true
 [environment]
 image_size                = 64
 pixels_per_unit           = 1.0
-max_steps                 = 100000
+max_steps                 = 10000
 history_length            = 8
 food_track_limit          = 5
 food_detection_radius     = 8
