@@ -18,6 +18,7 @@ from butterfly.env import ButterflyEnv
 
 from simple_app.history import HistoryBuffer, stack_scalar_dicts
 from simple_app.policy import SimplePolicy
+from simple_app.utils import print_progress_bar
 
 __all__ = ["compute_gae", "train", "run_episodes"]
 
@@ -130,7 +131,16 @@ def train(
             episode_return_accum = [0.0] * training.num_envs
             episode_returns = []
 
+            rollout_start_time = time.time()
+
             for step in range(training.rollout_length):
+                print_progress_bar(
+                    step + 1,
+                    training.rollout_length,
+                    prefix=f"Update {update:05d}/{total_updates} rollout ",
+                    start_time=rollout_start_time,
+                )
+
                 batch_images = []
                 batch_scalar_dicts = []
 
@@ -200,6 +210,8 @@ def train(
                 rollout_values.append(values.cpu())
                 rollout_dones.append(torch.tensor(step_dones, dtype=torch.float32))
 
+            print()
+
             images = torch.stack(rollout_images)
             scalars_tensor = {}
             for key in rollout_scalars[0]:
@@ -252,10 +264,21 @@ def train(
             entropy_losses = []
             total_losses = []
 
+            backprop_start_time = time.time()
+            minibatch_counter = 0
+
             for _ in range(training.ppo_epochs):
                 np.random.shuffle(indices)
 
                 for start in range(0, dataset_size, training.minibatch_size):
+                    minibatch_counter += 1
+                    print_progress_bar(
+                        minibatch_counter,
+                        total_minibatches,
+                        prefix=f"Update {update:05d}/{total_updates} backprop ",
+                        start_time=backprop_start_time,
+                    )
+
                     batch_indices = indices[start : start + training.minibatch_size]
 
                     batch_images = images[batch_indices].to(device)
@@ -304,18 +327,35 @@ def train(
                     entropy_losses.append(entropy_loss.item())
                     total_losses.append(loss.item())
 
+            print()
+
+            rollout_time = time.time() - rollout_start_time
+            backprop_time = time.time() - backprop_start_time
+
             reward_values = rewards.flatten()
-            return_values = returns.flatten()
-            action_magnitudes = actions.norm(dim=-1)
+            value_values = values.flatten()
+            advantage_values = advantages.cpu().flatten()
 
             if update % training.log_interval == 0:
+                episode_count = int(dones.sum().item())
+                episode_return_mean = (
+                    float(np.mean(episode_returns)) if episode_returns else float("nan")
+                )
+                avg_total_loss = float(np.mean(total_losses))
+
                 print(
                     f"Update {update:05d}/{total_updates} | "
-                    f"reward={reward_values.mean().item():.4f} | "
-                    f"return={return_values.mean().item():.4f} | "
-                    f"episodes={int(dones.sum().item())} | "
-                    f"loss={float(np.mean(total_losses)):.4f} | "
-                    f"action={action_magnitudes.mean().item():.3f}"
+                    f"reward={reward_values.mean().item(): .4f} | "
+                    f"value={value_values.mean().item(): .4f} | "
+                    f"advantage={advantage_values.mean().item(): .4f} | "
+                    f"loss={avg_total_loss: .4f} "
+                    f"(policy={np.mean(policy_losses): .4f}, "
+                    f"value={np.mean(value_losses): .4f}, "
+                    f"entropy={np.mean(entropy_losses): .4f}) | "
+                    f"action_sat={(actions.abs() > 0.99).float().mean().item():.1%} | "
+                    f"episodes={episode_count} | "
+                    f"episode_return={episode_return_mean: .3f} | "
+                    f"rollout={rollout_time:5.1f}s backprop={backprop_time:5.1f}s"
                 )
 
             if update % training.checkpoint_interval == 0:
