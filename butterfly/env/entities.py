@@ -4,7 +4,7 @@ import math
 
 import numpy as np
 
-from butterfly.config import Config, PredatorConfig, WorldConfig
+from butterfly.config import BirdConfig, Config, PlantConfig, WorldConfig
 
 __all__ = ["BirdState", "Bird", "Chunk", "WorldManager"]
 
@@ -21,8 +21,8 @@ class BirdState:
 
 
 class Bird:
-    def __init__(self, predator: PredatorConfig, spawn_pos, rng):
-        self.predator = predator
+    def __init__(self, bird: BirdConfig, spawn_pos, rng):
+        self.bird = bird
         self.pos = spawn_pos.copy().astype(np.float32)
         self.spawn_pos = spawn_pos.copy().astype(np.float32)
         self.state = BirdState.ROAM
@@ -45,7 +45,7 @@ class Bird:
     def _do_roam(self, butterfly_pos):
         if self.target_pos is None or self._reached_target():
             angle = self.rng.uniform(0, 2 * math.pi)
-            dist = self.rng.uniform(0, self.predator.patrol_range)
+            dist = self.rng.uniform(0, self.bird.patrol_range)
             self.target_pos = self.spawn_pos + np.array(
                 [dist * math.cos(angle), dist * math.sin(angle)], dtype=np.float32
             )
@@ -63,10 +63,10 @@ class Bird:
         )
 
         if dist > 0.1:
-            self.pos += (direction / dist) * self.predator.speed
+            self.pos += (direction / dist) * self.bird.speed
 
         dist_to_butterfly = float(np.linalg.norm(butterfly_pos - self.pos))
-        if dist_to_butterfly < self.predator.detection_range:
+        if dist_to_butterfly < self.bird.detection_radius:
             self.state = BirdState.CHASE
 
         return None
@@ -83,13 +83,13 @@ class Bird:
         )
 
         if dist > 0.05:
-            self.pos += (direction / dist) * self.predator.chase_speed
+            self.pos += (direction / dist) * self.bird.chase_speed
 
         if dist < 0.05:
             self.state = BirdState.RETURN
             return "kill"
 
-        if dist > self.predator.detection_range * 2:
+        if dist > self.bird.detection_radius * 2:
             self.state = BirdState.RETURN
 
         return None
@@ -106,7 +106,7 @@ class Bird:
         )
 
         if dist > 0.5:
-            self.pos += (direction / dist) * self.predator.speed
+            self.pos += (direction / dist) * self.bird.speed
         else:
             self.state = BirdState.ROAM
             self.target_pos = None
@@ -122,7 +122,7 @@ class Bird:
         offset = self.pos - butterfly_pos
         distance = float(np.linalg.norm(offset))
         angle = math.atan2(float(offset[1]), float(offset[0])) / math.pi
-        normalized_dist = min(distance / (self.predator.detection_range * 2), 1.0)
+        normalized_dist = min(distance / (self.bird.detection_radius * 2), 1.0)
         return angle, normalized_dist, self.state
 
 
@@ -131,8 +131,9 @@ class Bird:
 
 
 class Chunk:
-    def __init__(self, world: WorldConfig, chunk_x, chunk_y):
+    def __init__(self, world: WorldConfig, plant: PlantConfig, chunk_x, chunk_y):
         self.world = world
+        self.plant = plant
         self.chunk_x = chunk_x
         self.chunk_y = chunk_y
         self.plants = self._generate_plants()
@@ -142,12 +143,13 @@ class Chunk:
         chunk_seed = hash((self.chunk_x, self.chunk_y)) % (2**31)
         chunk_rng = np.random.default_rng(chunk_seed)
 
+        plant = self.plant
         world = self.world
-        enabled_dict = world.plant_types_enabled
-        enabled_types = [t for t in world.plant_types if enabled_dict.get(t, True)]
+        enabled_dict = plant.types_enabled
+        enabled_types = [t for t in plant.types if enabled_dict.get(t, True)]
         enabled_probs = [
             p
-            for t, p in zip(world.plant_types, world.plant_type_probs)
+            for t, p in zip(plant.types, plant.type_probs)
             if enabled_dict.get(t, True)
         ]
 
@@ -158,14 +160,14 @@ class Chunk:
         total = sum(enabled_probs)
         enabled_probs = [p / total for p in enabled_probs]
 
-        for _ in range(world.plants_per_chunk):
+        for _ in range(plant.plants_per_chunk):
             local_pos = chunk_rng.uniform(0, world.chunk_size, size=2).astype(
                 np.float32
             )
 
             plant_type = chunk_rng.choice(enabled_types, p=enabled_probs)
 
-            plant = {
+            plant_info = {
                 "type": plant_type,
                 "local_pos": local_pos,
                 "active": True,
@@ -173,25 +175,28 @@ class Chunk:
             }
 
             if plant_type == "interval":
-                num_phases = int(chunk_rng.integers(1, world.interval_phases_max + 1))
-                plant["phases"] = []
+                num_phases = int(
+                    chunk_rng.integers(1, plant.interval_phases_max + 1)
+                )
+                plant_info["phases"] = []
                 for _ in range(num_phases):
                     start = int(chunk_rng.integers(0, world.day_cycle_length))
                     duration = int(chunk_rng.integers(5, 20))
-                    plant["phases"].append((start, duration))
+                    plant_info["phases"].append((start, duration))
             elif plant_type == "random":
-                plant["appear_prob"] = float(chunk_rng.uniform(0.01, 0.05))
-                plant["disappear_prob"] = float(chunk_rng.uniform(0.01, 0.05))
-                plant["active"] = bool(chunk_rng.random() < 0.5)
+                plant_info["appear_prob"] = float(chunk_rng.uniform(0.01, 0.05))
+                plant_info["disappear_prob"] = float(chunk_rng.uniform(0.01, 0.05))
+                plant_info["active"] = bool(chunk_rng.random() < 0.5)
 
-            plants.append(plant)
+            plants.append(plant_info)
 
         return plants
 
 
 class WorldManager:
-    def __init__(self, world: WorldConfig, rng):
+    def __init__(self, world: WorldConfig, plant: PlantConfig, rng):
         self.world = world
+        self.plant = plant
         self.rng = rng
         self.loaded_chunks = {}
         self.current_chunk = (0, 0)
@@ -215,7 +220,7 @@ class WorldManager:
         for chunk_pos in needed_chunks:
             if chunk_pos not in self.loaded_chunks:
                 self.loaded_chunks[chunk_pos] = Chunk(
-                    self.world, chunk_pos[0], chunk_pos[1]
+                    self.world, self.plant, chunk_pos[0], chunk_pos[1]
                 )
 
     def get_all_plants(self, butterfly_world_pos):

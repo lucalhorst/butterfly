@@ -39,7 +39,11 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from butterfly.config import load_config
+from butterfly.config import (
+    apply_cli_overrides,
+    build_config_arg_group,
+    load_config,
+)
 from butterfly.env.environment import ButterflyEnv
 from butterfly.model.history import HistoryBuffer
 from butterfly.model.policy import ButterflyPolicy
@@ -166,7 +170,8 @@ def run_episode(config, policy, device, steps, seed, deterministic, saliency_res
     history.reset(observation, scalar_input)
 
     labels = scalar_feature_labels(
-        config.environment.food_track_limit, config.environment.max_birds
+        config.butterfly.perception.track_limit,
+        config.butterfly.perception.max_tracked_birds,
     )
     frames = []
 
@@ -203,8 +208,8 @@ def run_episode(config, policy, device, steps, seed, deterministic, saliency_res
         image_features = image_features.reshape(batch, hist, -1)
         image_features.retain_grad()
 
-        food_track_limit = config.environment.food_track_limit
-        max_birds = config.environment.max_birds
+        food_track_limit = config.butterfly.perception.track_limit
+        max_birds = config.butterfly.perception.max_tracked_birds
 
         context = grad_scalars["context"].reshape(flat_n, -1)
         context_features = ent.context_encoder(context)
@@ -345,8 +350,8 @@ def run_episode(config, policy, device, steps, seed, deterministic, saliency_res
 
     return {
         "scalar_labels": labels,
-        "num_transformer_layers": config.network.temporal_transformer_layers,
-        "num_transformer_heads": config.network.temporal_transformer_heads,
+        "num_transformer_layers": config.network.temporal_transformer.layers,
+        "num_transformer_heads": config.network.temporal_transformer.heads,
         "history_length": config.environment.history_length,
         "saliency_resolution": saliency_res,
         "frames": frames,
@@ -382,6 +387,7 @@ def build_parser():
         help="Sample actions from the policy distribution instead of using the deterministic mean",
     )
     parser.add_argument("--output", default="attribution.json")
+    build_config_arg_group(parser)
     return parser
 
 
@@ -396,6 +402,7 @@ def main():
         )
 
     config = load_config(args.config)
+    config = apply_cli_overrides(config, args)
 
     device = "cpu"  # attribution is a single small forward/backward pass; CPU is fine
     policy = ButterflyPolicy(config).to(device)

@@ -10,8 +10,10 @@ checkpoint_interval = 20
 log_interval        = 10
 
 [network]
-entity_transformer_heads       = 2
-entity_transformer_layers      = 2
-entity_transformer_feedforward = 256
-food_type_embedding_dim        = 8
-bird_state_embedding_dim       = 8
+food_type_embedding_dim  = 8
+bird_state_embedding_dim = 8
+
+[network.entity_transformer]
+heads       = 2
+feedforward = 256
+layers      = 2

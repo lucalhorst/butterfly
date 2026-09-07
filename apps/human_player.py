@@ -115,7 +115,7 @@ def main():
                 }
 
                 action = read_keyboard_action(
-                    cfg.environment.butterfly_speed, cfg.environment.butterfly_speed
+                    cfg.butterfly.speed, cfg.butterfly.speed
                 )
 
                 if action is None:

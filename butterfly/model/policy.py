@@ -28,10 +28,10 @@ class EntityEncoder(nn.Module):
         super().__init__()
 
         net = config.network
-        env_cfg = config.environment
+        perception = config.butterfly.perception
         feature_size = net.feature_size
-        self.food_track_limit = env_cfg.food_track_limit
-        self.max_birds = env_cfg.max_birds
+        self.food_track_limit = perception.track_limit
+        self.max_birds = perception.max_tracked_birds
 
         self.visual_encoder = ResNetEncoder(feature_size)
 
@@ -63,14 +63,14 @@ class EntityEncoder(nn.Module):
 
         entity_layer = nn.TransformerEncoderLayer(
             d_model=feature_size,
-            nhead=net.entity_transformer_heads,
-            dim_feedforward=net.entity_transformer_feedforward,
-            dropout=net.entity_transformer_dropout,
+            nhead=net.entity_transformer.heads,
+            dim_feedforward=net.entity_transformer.feedforward,
+            dropout=net.entity_transformer.dropout,
             batch_first=True,
             activation="gelu",
         )
         self.entity_transformer = nn.TransformerEncoder(
-            entity_layer, num_layers=net.entity_transformer_layers
+            entity_layer, num_layers=net.entity_transformer.layers
         )
 
     def forward(self, image_sequence, scalar_dict):
@@ -175,16 +175,16 @@ class ButterflyPolicy(nn.Module):
 
         transformer_layer = nn.TransformerEncoderLayer(
             d_model=feature_size,
-            nhead=config.network.temporal_transformer_heads,
-            dim_feedforward=config.network.temporal_transformer_feedforward,
-            dropout=config.network.temporal_transformer_dropout,
+            nhead=config.network.temporal_transformer.heads,
+            dim_feedforward=config.network.temporal_transformer.feedforward,
+            dropout=config.network.temporal_transformer.dropout,
             batch_first=True,
             activation="gelu",
         )
 
         self.transformer = nn.TransformerEncoder(
             transformer_layer,
-            num_layers=config.network.temporal_transformer_layers,
+            num_layers=config.network.temporal_transformer.layers,
         )
 
         self.policy_head = nn.Sequential(

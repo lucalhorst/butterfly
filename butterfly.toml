@@ -16,65 +16,76 @@ log_csv             = true
 log_tensorboard     = true
 
 [environment]
-image_size                = 64
-pixels_per_unit           = 1.0
-max_steps                 = 10000
-history_length            = 8
-food_track_limit          = 5
-food_detection_radius     = 8
-max_birds                 = 10
+image_size      = 64
+pixels_per_unit = 1.0
+max_steps       = 10000
+history_length  = 8
+
+[butterfly]
+speed                     = 0.5
 initial_hunger            = 1.0
 hunger_depletion_per_step = 0.0002
-food_hunger_restore       = 0.35
-butterfly_speed           = 0.5
 
-[environment.rewards]
+[butterfly.rewards]
 base_step            = -0.002
 movement_scale       = 0.02
 eating_distance      = 0.55
 eating_reward        = 6.0
 hunger_death_penalty = -5.0
-bird_kill_penalty    = -10.0
+kill_penalty         = -10.0
 
-[world]
-chunk_size              = 16
-chunks_loaded           = 16
-plants_per_chunk        = 2
-day_cycle_length        = 100
-day_duration            = 50
-night_duration          = 50
-plant_cooldown          = 25
-interval_phases_max     = 3
-day_night_cycle_enabled = true
-plant_types             = ["day", "night", "interval", "random"]
-plant_type_probs        = [0.35, 0.35, 0.2, 0.1]
+[butterfly.perception]
+detection_radius  = 8
+track_limit       = 5
+max_tracked_birds = 10
 
-[world.plant_types_enabled]
+[bird]
+enabled           = true
+population        = 10
+speed             = 0.25
+detection_radius  = 8
+chase_speed       = 0.35
+patrol_range      = 8.0
+spawn_radius      = 50.0
+
+[plant]
+plants_per_chunk  = 2
+cooldown          = 25
+types             = ["day", "night", "interval", "random"]
+type_probs        = [0.35, 0.35, 0.2, 0.1]
+hunger_restore    = 0.35
+interval_phases_max = 3
+
+[plant.types_enabled]
 day      = true
 night    = true
 interval = true
 random   = true
 
-[predator]
-enabled         = true
-speed           = 0.25
-detection_range = 8
-chase_speed     = 0.35
-patrol_range    = 8.0
-spawn_radius    = 50.0
+[world]
+chunk_size              = 16
+chunks_loaded           = 16
+day_cycle_length        = 100
+day_duration            = 50
+night_duration          = 50
+day_night_cycle_enabled = true
 
 [network]
-feature_size                     = 256
-temporal_transformer_heads       = 8
-temporal_transformer_feedforward = 512
-temporal_transformer_dropout     = 0.1
-temporal_transformer_layers      = 3
-entity_transformer_heads         = 2
-entity_transformer_feedforward   = 192
-entity_transformer_dropout       = 0.1
-entity_transformer_layers        = 1
-food_type_embedding_dim          = 8
-bird_state_embedding_dim         = 8
+feature_size             = 256
+food_type_embedding_dim  = 8
+bird_state_embedding_dim = 8
+
+[network.temporal_transformer]
+heads       = 8
+feedforward = 512
+dropout     = 0.1
+layers      = 3
+
+[network.entity_transformer]
+heads       = 2
+feedforward = 192
+dropout     = 0.1
+layers      = 1
 
 [rendering]
 window_size       = 600

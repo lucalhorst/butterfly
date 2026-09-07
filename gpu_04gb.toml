@@ -12,8 +12,10 @@ log_interval        = 5
 [network]
 # Small entity transformer for the low-VRAM tier; keeps the added per-frame
 # attention cost minimal. Other network settings use defaults.
-entity_transformer_heads       = 1
-entity_transformer_layers      = 1
-entity_transformer_feedforward = 96
-food_type_embedding_dim        = 4
-bird_state_embedding_dim       = 4
+food_type_embedding_dim  = 4
+bird_state_embedding_dim = 4
+
+[network.entity_transformer]
+heads       = 1
+feedforward = 96
+layers      = 1

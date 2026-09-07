@@ -91,7 +91,7 @@ class ButterflyEnv:
         self.rng = np.random.default_rng(seed)
         self.render_enabled = render
 
-        self.hunger = config.environment.initial_hunger
+        self.hunger = config.butterfly.initial_hunger
         self.butterfly_world_pos = np.zeros(2, dtype=np.float32)
         self.collected = 0
         self.steps = 0
@@ -119,10 +119,10 @@ class ButterflyEnv:
         self.time_step = 0
         self.is_daytime = True
         self.steps = 0
-        self.hunger = cfg.environment.initial_hunger
+        self.hunger = cfg.butterfly.initial_hunger
         self.collected = 0
 
-        self.world = WorldManager(cfg.world, self.rng)
+        self.world = WorldManager(cfg.world, cfg.plant, self.rng)
 
         self.butterfly_world_pos = self.rng.uniform(
             -cfg.world.chunk_size / 2, cfg.world.chunk_size / 2, size=2
@@ -131,16 +131,16 @@ class ButterflyEnv:
         self.world.update(self.butterfly_world_pos)
 
         self.birds = []
-        if cfg.predator.enabled:
-            spawn_radius = cfg.predator.spawn_radius
-            for _ in range(cfg.environment.max_birds):
+        if cfg.bird.enabled:
+            spawn_radius = cfg.bird.spawn_radius
+            for _ in range(cfg.bird.population):
                 angle = self.rng.uniform(0, 2 * math.pi)
                 dist = spawn_radius * math.sqrt(self.rng.uniform(0, 1))
                 bird_spawn = self.butterfly_world_pos + np.array(
                     [dist * math.cos(angle), dist * math.sin(angle)],
                     dtype=np.float32,
                 )
-                self.birds.append(Bird(cfg.predator, bird_spawn, self.rng))
+                self.birds.append(Bird(cfg.bird, bird_spawn, self.rng))
 
         observation = self.render_observation()
         scalar_inputs = self.get_scalar_inputs()
@@ -165,7 +165,7 @@ class ButterflyEnv:
 
         old_position = self.butterfly_world_pos.copy()
 
-        self.butterfly_world_pos += action * cfg.environment.butterfly_speed
+        self.butterfly_world_pos += action * cfg.butterfly.speed
 
         self.world.update(self.butterfly_world_pos)
 
@@ -173,30 +173,30 @@ class ButterflyEnv:
             self.butterfly_world_pos, self.time_step
         )
 
-        self.hunger -= cfg.environment.hunger_depletion_per_step
+        self.hunger -= cfg.butterfly.hunger_depletion_per_step
         self.hunger = max(0.0, self.hunger)
 
-        reward = cfg.environment.rewards.base_step
+        reward = cfg.butterfly.rewards.base_step
 
         movement = np.linalg.norm(self.butterfly_world_pos - old_position)
-        reward += float(movement) * cfg.environment.rewards.movement_scale
+        reward += float(movement) * cfg.butterfly.rewards.movement_scale
 
         for plant_info in visible_plants:
             distance = np.linalg.norm(
                 self.butterfly_world_pos - plant_info["world_pos"]
             )
-            if distance < cfg.environment.rewards.eating_distance:
-                reward += cfg.environment.rewards.eating_reward
-                self.hunger += cfg.environment.food_hunger_restore
+            if distance < cfg.butterfly.rewards.eating_distance:
+                reward += cfg.butterfly.rewards.eating_reward
+                self.hunger += cfg.plant.hunger_restore
                 self.hunger = min(1.0, self.hunger)
                 self.collected += 1
 
                 plant_ref = plant_info["plant_ref"]
                 plant_ref["active"] = False
-                plant_ref["cooldown_until"] = self.time_step + cfg.world.plant_cooldown
+                plant_ref["cooldown_until"] = self.time_step + cfg.plant.cooldown
 
         bird_killed = False
-        if cfg.predator.enabled:
+        if cfg.bird.enabled:
             for bird in self.birds:
                 bird_result = bird.update(self.butterfly_world_pos)
                 if bird_result == "kill":
@@ -207,10 +207,10 @@ class ButterflyEnv:
         truncated = self.steps >= cfg.environment.max_steps
 
         if hunger_dead:
-            reward += cfg.environment.rewards.hunger_death_penalty
+            reward += cfg.butterfly.rewards.hunger_death_penalty
 
         if bird_killed:
-            reward += cfg.environment.rewards.bird_kill_penalty
+            reward += cfg.butterfly.rewards.kill_penalty
 
         observation = self.render_observation()
         scalar_inputs = self.get_scalar_inputs()
@@ -238,9 +238,9 @@ class ButterflyEnv:
 
     def get_scalar_inputs(self):
         cfg = self.config
-        env_cfg = cfg.environment
-        food_track_limit = env_cfg.food_track_limit
-        max_birds = env_cfg.max_birds
+        perception = cfg.butterfly.perception
+        food_track_limit = perception.track_limit
+        max_birds = perception.max_tracked_birds
 
         hunger = np.array([self.hunger], dtype=np.float32)
 
@@ -287,10 +287,10 @@ class ButterflyEnv:
             offset = plant_info["world_pos"] - self.butterfly_world_pos
             distance = float(np.linalg.norm(offset))
 
-            if distance <= env_cfg.food_detection_radius:
+            if distance <= perception.detection_radius:
                 angle = math.atan2(float(offset[1]), float(offset[0]))
                 normalized_angle = angle / math.pi
-                normalized_radius = distance / env_cfg.food_detection_radius
+                normalized_radius = distance / perception.detection_radius
                 detectable_food.append(
                     (
                         distance,
@@ -441,7 +441,7 @@ class ButterflyEnv:
 
         self.window.fill(bg_color)
 
-        det_radius_px = int(cfg.environment.food_detection_radius * view_scale)
+        det_radius_px = int(cfg.butterfly.perception.detection_radius * view_scale)
         pygame.draw.circle(
             self.window,
             (160, 160, 160),
