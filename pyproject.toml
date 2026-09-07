@@ -18,8 +18,8 @@ dependencies    = [
 butterfly-ai     = "apps.ai_player:main"
 butterfly-attrib = "apps.attribution_viewer:main"
 butterfly-play   = "apps.human_player:main"
-butterfly-test   = "apps.train:main"
-butterfly-train  = "apps.check_valid:main"
+butterfly-test   = "apps.check_valid:main"
+butterfly-train  = "apps.train:main"
 
 [build-system]
 requires      = ["setuptools>=68"]
