@@ -10,6 +10,12 @@ def build_parser():
     parser = argparse.ArgumentParser(
         description="Virtual Butterfly RL agent - test checkpoint if they match the model",
     )
+    parser.add_argument(
+        "--config",
+        type=str,
+        default=None,
+        help="Path to TOML config file (default: butterfly.toml)",
+    )
 
     parser.add_argument(
         "--weight-folder",
