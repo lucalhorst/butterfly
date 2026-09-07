@@ -1,5 +1,5 @@
 [training]
-rollout_length      = 256
+rollout_length      = 512
 ppo_epochs          = 2
 minibatch_size      = 256
 gamma               = 0.99
